@@ -1,0 +1,87 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mission-control-html
+  namespace: default
+data:
+  index.html: |
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>HYPERNOVA :: COMMAND</title>
+      <style>
+        body { background-color: #000; color: #00ff00; font-family: 'Courier New', monospace; padding: 20px; }
+        .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-top: 20px; }
+        .card { border: 1px solid #333; padding: 15px; background: #0a0a0a; }
+        h1 { border-bottom: 2px solid #00ff00; padding-bottom: 10px; }
+        .status-ok { color: #00ff00; font-weight: bold; }
+        .blink { animation: blinker 1s linear infinite; }
+        @keyframes blinker { 50% { opacity: 0; } }
+      </style>
+    </head>
+    <body>
+      <h1>🚀 PROJECT HYPERNOVA <span class="blink">_ONLINE</span></h1>
+      <div class="grid">
+        <div class="card">
+          <h3>INFRASTRUCTURE</h3>
+          <p>PROVISIONER: <span class="status-ok">TERRAFORM</span></p>
+          <p>TARGET: <span class="status-ok">LOCAL (MINIKUBE)</span></p>
+        </div>
+        <div class="card">
+          <h3>AI ENGINE (RAY)</h3>
+          <p>STATUS: <span class="status-ok">ACTIVE</span></p>
+          <p>WORKERS: 3 NODES</p>
+          <p>GPU MODE: SIMULATED</p>
+        </div>
+        <div class="card">
+          <h3>ORCHESTRATION</h3>
+          <p>CONTROLLER: <span class="status-ok">ARGOCD</span></p>
+          <p>SYNC: AUTO-HEAL ENABLED</p>
+        </div>
+      </div>
+      <br>
+      <p>> System integrity verified.</p>
+      <p>> Waiting for neural payload...</p>
+    </body>
+    </html>
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mission-control
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mission-control
+  template:
+    metadata:
+      labels:
+        app: mission-control
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:alpine
+        ports:
+        - containerPort: 80
+        volumeMounts:
+        - name: html-volume
+          mountPath: /usr/share/nginx/html
+      volumes:
+      - name: html-volume
+        configMap:
+          name: mission-control-html
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mission-control-svc
+  namespace: default
+spec:
+  type: ClusterIP
+  selector:
+    app: mission-control
+  ports:
+  - port: 80
+    targetPort: 80

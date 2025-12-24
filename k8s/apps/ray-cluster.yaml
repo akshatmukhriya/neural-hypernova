@@ -1,27 +1,110 @@
-# The Head Node (Brain)
-apiVersion: ray.io/v1alpha1
-kind: RayCluster
+# --- 1. KubeRay Operator (The Manager) ---
+apiVersion: v1
+kind: Namespace
 metadata:
-  name: supernova-ai
+  name: ray-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kuberay-operator
+  namespace: ray-system
 spec:
-  headGroupSpec:
-    rayStartParams:
-      dashboard-host: '0.0.0.0'
-    template:
-      spec:
-        containers:
-        - name: ray-head
-          image: rayproject/ray:2.9.0
-          resources:
-            requests:
-              cpu: "1"
-              memory: "2Gi"
-  # The Worker Nodes (Muscles)
-  workerGroupSpecs:
-  - groupName: gpu-group
-    replicas: 3
-    template:
-      spec:
-        containers:
-        - name: ray-worker
-          image: rayproject/ray:2.9.0
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kuberay
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kuberay
+    spec:
+      serviceAccountName: kuberay-operator
+      containers:
+      - name: kuberay-operator
+        image: kuberay/operator:v1.0.0
+        resources:
+          limits:
+            cpu: 100m
+            memory: 128Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+---
+# (Skipping huge CRD definitions for brevity - assuming standard KubeRay Helm install or simplified CR usage)
+# FOR THIS DEMO: We will use a "Headless" Ray setup if CRDs are tricky to manage in raw YAML.
+# BUT, to be a Unicorn, let's use the native RayCluster CR.
+# NOTE: ArgoCD might complain if CRDs aren't there. 
+# SIMPLIFIED APPROACH for One-Click: Standard Deployment 
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: ray-head
+  namespace: default
+  labels:
+    ray.io/node-type: head
+spec:
+  ports:
+  - name: dashboard
+    port: 8265
+    targetPort: 8265
+  - name: client
+    port: 10001
+    targetPort: 10001
+  selector:
+    ray.io/node-type: head
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ray-head
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      ray.io/node-type: head
+  template:
+    metadata:
+      labels:
+        ray.io/node-type: head
+    spec:
+      containers:
+      - name: ray-head
+        image: rayproject/ray:2.9.0
+        command: [ "/bin/bash", "-c", "--" ]
+        args:
+          - "ray start --head --dashboard-host=0.0.0.0 --block" 
+        resources:
+          requests:
+            cpu: 500m 
+            memory: 1Gi
+        ports:
+        - containerPort: 8265 # Dashboard
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ray-worker
+  namespace: default
+spec:
+  replicas: 3 # THE SCALE (3 Workers)
+  selector:
+    matchLabels:
+      ray.io/node-type: worker
+  template:
+    metadata:
+      labels:
+        ray.io/node-type: worker
+    spec:
+      containers:
+      - name: ray-worker
+        image: rayproject/ray:2.9.0
+        command: [ "/bin/bash", "-c", "--" ]
+        args:
+          - "ray start --address=ray-head:6379 --block"
+        resources:
+          requests:
+            cpu: 500m
+            memory: 1Gi

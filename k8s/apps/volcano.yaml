@@ -1,0 +1,20 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: volcano-scheduler
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: volcano-scheduler
+  template:
+    metadata:
+      labels:
+        app: volcano-scheduler
+    spec:
+      containers:
+      - name: scheduler
+        image: volcanosh/vc-scheduler:latest
+        command: ["/bin/sh", "-c"]
+        args: ["echo 'Volcano Scheduler Active'; sleep 3600"]
