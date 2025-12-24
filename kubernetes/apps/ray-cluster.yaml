@@ -1,0 +1,27 @@
+# The Head Node (Brain)
+apiVersion: ray.io/v1alpha1
+kind: RayCluster
+metadata:
+  name: supernova-ai
+spec:
+  headGroupSpec:
+    rayStartParams:
+      dashboard-host: '0.0.0.0'
+    template:
+      spec:
+        containers:
+        - name: ray-head
+          image: rayproject/ray:2.9.0
+          resources:
+            requests:
+              cpu: "1"
+              memory: "2Gi"
+  # The Worker Nodes (Muscles)
+  workerGroupSpecs:
+  - groupName: gpu-group
+    replicas: 3
+    template:
+      spec:
+        containers:
+        - name: ray-worker
+          image: rayproject/ray:2.9.0

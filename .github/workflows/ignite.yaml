@@ -1,0 +1,30 @@
+name: 🚀 Ignite Neural Supernova
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Environment (local/aws)'
+        required: true
+        default: 'local'
+
+jobs:
+  deploy:
+    # Use 'self-hosted' for Local Demo, 'ubuntu-latest' for AWS
+    runs-on: ${{ inputs.target == 'local' && 'self-hosted' || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v3
+
+      # 1. INFRASTRUCTURE (Terraform)
+      - name: 🏗️ Provision Infrastructure
+        run: |
+          cd infra
+          terraform init
+          terraform apply -var="target=${{ inputs.target }}" -auto-approve
+
+      # 2. CONFIGURATION (Ansible)
+      # Terraform generated the inventory file in the previous step
+      - name: 🔗 Bootstrap Cluster
+        run: |
+          cd config
+          ansible-galaxy collection install kubernetes.core
+          ansible-playbook -i ../infra/inventory.ini playbook.yaml

@@ -1,0 +1,31 @@
+- name: Bootstrap Supernova
+  hosts: supernova
+  tasks:
+    - name: Create ArgoCD Namespace
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        name: argocd
+        kind: Namespace
+        state: present
+
+    - name: Install ArgoCD
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        src: https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+
+    - name: Apply "App of Apps" (Kickstart GitOps)
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        definition:
+          apiVersion: argoproj.io/v1alpha1
+          kind: Application
+          metadata:
+            name: root-app
+            namespace: argocd
+          spec:
+            source:
+              repoURL: 'https://github.com/YOUR_GITHUB_USER/neural-supernova'
+              path: k8s
+            destination:
+              server: https://kubernetes.default.svc
+              namespace: default
