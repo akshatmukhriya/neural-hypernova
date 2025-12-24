@@ -23,8 +23,17 @@ jobs:
 
       # 2. CONFIGURATION (Ansible)
       # Terraform generated the inventory file in the previous step
-      - name: 🔗 Bootstrap Cluster
+      - name: Bootstrap Cluster🐍 (Setup & Run Ansible)
         run: |
-          cd config
+          echo ">> [DEPENDENCY] Installing Ansible & Python K8s lib..."
+          # We install Ansible and the Kubernetes Python library (required for the module)
+          pip3 install ansible kubernetes
+          
+          echo ">> [GALAXY] Installing K8s Collection..."
+          # Ensure path includes user base binary directory just in case
+          export PATH=$PATH:$(python3 -m site --user-base)/bin
           ansible-galaxy collection install kubernetes.core
+          
+          echo ">> [EXECUTION] Running Playbook..."
+          cd config
           ansible-playbook -i ../infra/inventory.ini playbook.yaml
