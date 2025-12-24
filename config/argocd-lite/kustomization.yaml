@@ -1,0 +1,79 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: argocd
+
+# 1. Base (The Heavy Upstream)
+resources:
+  - https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+
+# 2. Scale Down Bloat (Notifications, Dex, AppSet -> 0 Replicas)
+replicas:
+- name: argocd-notifications-controller
+  count: 0
+- name: argocd-applicationset-controller
+  count: 0
+- name: argocd-dex-server
+  count: 1 # Keep 1 for login, but we limit it below
+
+# 3. The Surgery (Patches)
+patches:
+  # A. REMOVE PROBES & LIMITS (Server)
+  - target:
+      kind: Deployment
+      name: argocd-server
+    patch: |-
+      - op: remove
+        path: /spec/template/spec/containers/0/livenessProbe
+      - op: remove
+        path: /spec/template/spec/containers/0/readinessProbe
+      - op: replace
+        path: /spec/template/spec/containers/0/resources
+        value:
+          requests:
+            cpu: "50m"
+            memory: "64Mi"
+  
+  # B. REMOVE PROBES & LIMITS (Repo Server - The RAM Eater)
+  - target:
+      kind: Deployment
+      name: argocd-repo-server
+    patch: |-
+      - op: remove
+        path: /spec/template/spec/containers/0/livenessProbe
+      - op: remove
+        path: /spec/template/spec/containers/0/readinessProbe
+      - op: replace
+        path: /spec/template/spec/containers/0/resources
+        value:
+          requests:
+            cpu: "50m"
+            memory: "64Mi"
+
+  # C. REMOVE PROBES & LIMITS (App Controller)
+  - target:
+      kind: StatefulSet
+      name: argocd-application-controller
+    patch: |-
+      - op: remove
+        path: /spec/template/spec/containers/0/livenessProbe
+      - op: remove
+        path: /spec/template/spec/containers/0/readinessProbe
+      - op: replace
+        path: /spec/template/spec/containers/0/resources
+        value:
+          requests:
+            cpu: "50m"
+            memory: "64Mi"
+
+  # D. FIX REDIS (Remove Limits)
+  - target:
+      kind: Deployment
+      name: argocd-redis
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources
+        value:
+          requests:
+            cpu: "50m"
+            memory: "64Mi"

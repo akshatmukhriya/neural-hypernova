@@ -17,12 +17,13 @@
         state: present
 
     # 2. INSTALL ARGOCD (The Engine)
-    - name: Install ArgoCD Core
-      kubernetes.core.k8s:
-        kubeconfig: "{{ kubeconfig_path }}"
-        namespace: argocd
-        src: https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
-        state: present
+    - name: Install ArgoCD (Lite Edition) via Kustomize
+      ansible.builtin.shell:
+        cmd: "kubectl apply -k ."
+        chdir: "{{ playbook_dir }}/argocd-lite"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+
 
     # 3. WAIT FOR ARGOCD (The Pulse Check)
     - name: Wait for ArgoCD Server to be Ready
