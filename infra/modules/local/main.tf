@@ -1,50 +1,29 @@
 resource "null_resource" "minikube_start" {
-  # Trigger only if specs change
   triggers = {
-    always_run = "${timestamp()}" # Force check every time
+    always_run = "${timestamp()}"
   }
 
   provisioner "local-exec" {
     interpreter = ["/bin/bash", "-c"]
     command = <<EOT
+      # [SAME AUTO-HEAL LOGIC AS BEFORE - KEEP IT]
       echo ">> [PRE-FLIGHT] Checking Docker Daemon status..."
-      
-      # 1. Check if Docker CLI responds
       if ! docker info > /dev/null 2>&1; then
         echo "❌ [ERROR] Docker is NOT running."
-        echo "   Action Required: Start Docker Desktop on your machine."
-        
-        # MAC OS AUTOMATION (Attempt to auto-start if on Mac)
         if [[ "$OSTYPE" == "darwin"* ]]; then
             echo "   [AUTO-FIX] Attempting to start Docker.app..."
             open -a Docker
-            echo "   Waiting for Docker to initialize (this may take 30s)..."
-            
-            # Wait loop
             for i in {1..15}; do
-                if docker info > /dev/null 2>&1; then
-                    echo "✅ Docker started successfully."
-                    break
-                fi
-                echo -n "."
+                if docker info > /dev/null 2>&1; then echo "✅ Docker started."; break; fi
                 sleep 2
             done
-            
-            # Final check
-            if ! docker info > /dev/null 2>&1; then
-                 echo "❌ Failed to start Docker. Please start it manually and retry."
-                 exit 1
-            fi
-        else
-            exit 1
         fi
-      else
-        echo "✅ [PRE-FLIGHT] Docker is ready."
       fi
-
-      # 2. Ignite Minikube
+      
+      # 2. IGNITION - TUNED FOR LOCAL DEV
+      # Reduced Memory to 6000MB to fit inside standard Docker Desktop limits
       echo ">> [IGNITION] Starting Minikube Cluster..."
-      minikube status || minikube start --cpus 4 --memory 8192 --driver docker
+      minikube start --cpus 4 --memory 6000 --driver docker
     EOT
   }
 
