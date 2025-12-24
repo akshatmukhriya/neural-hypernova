@@ -1,4 +1,4 @@
-name: 💀 Nuke Supernova (Protocol Zero)
+name: 💀 Nuke Hypernova (Protocol Zero)
 on:
   workflow_dispatch:
     inputs:

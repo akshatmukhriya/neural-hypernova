@@ -1,4 +1,4 @@
-name: 🚀 Ignite Neural Supernova
+name: 🚀 Ignite Neural Hypernova
 on:
   workflow_dispatch:
     inputs:
