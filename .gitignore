@@ -1,1 +1,3 @@
-actions-runner/git remote -v
+# Ignore GitHub Actions local runner
+actions-runner/
+actions-runner/**
