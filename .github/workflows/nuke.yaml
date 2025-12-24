@@ -1,0 +1,64 @@
+name: 💀 Nuke Supernova (Protocol Zero)
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Target to Destroy (local/aws)'
+        required: true
+        default: 'local'
+        type: choice
+        options:
+        - local
+        - aws
+
+jobs:
+  obliterate:
+    # INTELLIGENT ROUTING: 
+    # If Local: Runs on your laptop (Self-Hosted) to kill Minikube.
+    # If AWS: Runs on Cloud Runner to nuke EKS.
+    runs-on: ${{ inputs.target == 'local' && 'self-hosted' || 'ubuntu-latest' }}
+    
+    steps:
+      - name: 🛑 Checkout Code
+        uses: actions/checkout@v3
+
+      - name: 🔔 Notify Destruction Start
+        uses: rtCamp/action-slack-notify@v2
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+          SLACK_COLOR: "#FF0000" # RED
+          SLACK_MESSAGE: "⚠️ PROTOCOL ZERO INITIATED for ${{ inputs.target }}. Imploding infrastructure..."
+
+      - name: 🏗️ Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_wrapper: false
+
+      - name: 🧨 Terraform Destroy
+        run: |
+          cd infra
+          
+          # Initialize to get plugins
+          terraform init
+          
+          # The Kill Command
+          # This triggers the 'when = destroy' provisioner in our modules
+          echo ">> Destroying Infrastructure..."
+          terraform destroy -var="target=${{ inputs.target }}" -auto-approve
+
+      - name: 🧹 Deep Clean (Local Only)
+        if: inputs.target == 'local'
+        run: |
+          echo ">> Ensuring Minikube is dead..."
+          minikube delete --all || true
+          
+          echo ">> Pruning Docker leftovers..."
+          docker system prune -f --volumes || true
+          
+          echo ">> Cleaning Terraform State..."
+          rm -rf infra/.terraform infra/terraform.tfstate*
+
+      - name: ☠️ Notify Total Erasure
+        uses: rtCamp/action-slack-notify@v2
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }
