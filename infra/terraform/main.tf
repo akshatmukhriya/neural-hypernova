@@ -55,11 +55,14 @@ module "vpc" {
 
 module "lb_role" {
   source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
-  version = "5.33.0" # Lock the version for stability
+  version = "5.33.0"
 
   role_name = "aws-load-balancer-controller-hypernova"
 
-  attach_load_balancer_controller_policy = true
+  # We attach the official policy we just created
+  role_policy_arns = {
+    policy = aws_iam_policy.lb_controller.arn
+  }
 
   oidc_providers = {
     main = {
