@@ -1,43 +1,111 @@
 #!/bin/bash
 set -e
 
-# Path to Terraform directory
+# --- ARCHITECTURAL CONSTANTS ---
+COLOR_CYAN='\033[0;36m'
+COLOR_RED='\033[0;31m'
+COLOR_GREEN='\033[0;32m'
+COLOR_RESET='\033[0m'
 TF_DIR="infra/terraform"
 
+# --- ELITE LOGGING ENGINE ---
+function log() {
+    echo -e "${COLOR_CYAN}[HYPERNOVA-LOG] $(date +'%H:%M:%S') | $1${COLOR_RESET}"
+}
+
+function error_log() {
+    echo -e "${COLOR_RED}[HYPERNOVA-ERROR] $1${COLOR_RESET}"
+}
+
+# --- THE IGNITE PROTOCOL ---
 function ignite() {
-    log "Initiating Infrastructure Provisioning..."
-    cd infra/terraform
+    log "Initiating Sovereign AI Forge Deployment..."
+
+    # 1. Terraform Infrastructure
+    if [ ! -d "$TF_DIR" ]; then
+        error_log "Directory $TF_DIR not found!"
+        exit 1
+    fi
+
+    cd "$TF_DIR"
+    log "Executing Terraform Plan & Apply..."
     terraform init
     terraform apply -auto-approve
 
+    # 2. Extract Metadata (The "Address Book")
     log "Extracting Architectural Metadata..."
-    # The '|| echo "neural-hypernova"' is a safety fallback
     CLUSTER_NAME=$(terraform output -raw cluster_name 2>/dev/null || echo "neural-hypernova")
     REGION=$(terraform output -raw region 2>/dev/null || echo "us-east-1")
 
-    log "Syncing Kubeconfig for Cluster: $CLUSTER_NAME in $REGION..."
+    # 3. Kubeconfig Sync
+    log "Synchronizing Kubeconfig for Cluster: $CLUSTER_NAME..."
     aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER_NAME"
 
-    # Verify connection
-    kubectl get nodes
-
-    log "Injecting High-Performance Components..."
-    # Helm commands follow...
+    # 4. Core Engine Injection (Helm)
+    log "Registering High-Performance Helm Repositories..."
     helm repo add cilium https://helm.cilium.io/
     helm repo add karpenter https://charts.karpenter.sh/
+    helm repo add kuberay https://ray-project.github.io/kuberay-helm/
     helm repo update
 
-    # Optimized Cilium Install for AI (Bypassing Kube-Proxy)
+    # 5. eBPF Data Plane (Cilium)
+    log "Injecting Cilium eBPF (Bypassing Kube-Proxy for Zero-Latency)..."
     helm upgrade --install cilium cilium/cilium --version 1.15.5 \
       --namespace kube-system \
       --set kubeProxyReplacement=true \
       --set k8sServiceHost=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}') \
       --set k8sServicePort=6443
 
-    log "HYPERNOVA CLUSTER IS ARMED."
+    # 6. Karpenter (Just-in-Time Scaling)
+    log "Initializing Karpenter Node-Provisioner..."
+    helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter \
+      --version v0.35.0 \
+      --namespace karpenter --create-namespace \
+      --set settings.aws.clusterName="$CLUSTER_NAME" \
+      --set settings.aws.defaultInstanceProfile="KarpenterNodeInstanceProfile-$CLUSTER_NAME" \
+      --wait
+
+    # 7. KubeRay (The AI Brain)
+    log "Deploying KubeRay Operator..."
+    helm upgrade --install kuberay-operator kuberay/kuberay-operator --version 1.0.0
+
+    # 8. Final Manifests
+    log "Applying GPU NodePools and RayCluster..."
+    cd ../..
+    kubectl apply -f k8s/core/karpenter-gpu-pool.yaml
+    kubectl apply -f k8s/ai-forge/ray-cluster.yaml
+
+    log "✅ NEURAL HYPERNOVA IS FULLY ARMED AND OPERATIONAL."
+    echo -e "${COLOR_GREEN}Access the Ray Dashboard by running: kubectl port-forward svc/raycluster-head-svc 8265:8265${COLOR_RESET}"
 }
 
+# --- THE SCORCHED EARTH PROTOCOL ---
+function nuke() {
+    log "SCORCHED EARTH PROTOCOL ENGAGED. PREPARING FOR TOTAL ERASURE..."
+    
+    # 1. Graceful AI Cluster Shutdown
+    log "De-provisioning AI Workloads..."
+    kubectl delete -f k8s/ai-forge/ray-cluster.yaml --ignore-not-found || true
+    
+    # 2. Terraform Destruction
+    cd "$TF_DIR"
+    log "Executing Terraform Destroy..."
+    terraform destroy -auto-approve
+
+    # 3. The Sweep (Clean up orphaned resources)
+    log "Sweeping Orphaned Network Interfaces & Volumes..."
+    # Force delete any ENIs associated with the cluster security group to prevent VPC deletion hangs
+    SG_ID=$(aws ec2 describe-security-groups --filters Name=tag:Name,Values="*neural-hypernova*" --query "SecurityGroups[0].GroupId" --output text)
+    if [ "$SG_ID" != "None" ]; then
+        aws ec2 describe-network-interfaces --filters Name=group-id,Values="$SG_ID" --query "NetworkInterfaces[*].NetworkInterfaceId" --output text | xargs -I {} aws ec2 delete-network-interface --network-interface-id {} || true
+    fi
+
+    log "🌑 ZERO TRACE REMAINING. HYPERNOVA EXTINGUISHED."
+}
+
+# --- COMMAND ROUTER ---
 case "$1" in
     ignite) ignite ;;
     nuke) nuke ;;
+    *) echo "Usage: $0 {ignite|nuke}" ;;
 esac
