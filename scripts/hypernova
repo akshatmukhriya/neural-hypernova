@@ -170,48 +170,55 @@ EOF
 
 # --- THE NUKE PROTOCOL (Total Erasure) ---
 function nuke() {
-    log "☢️ Executing Scorched Earth Protocol..."
-    
-    # 1. Initialize Terraform to reach the S3 state
-    cd "$TF_DIR"
-    log "Re-initializing Terraform backend to recover state..."
-    terraform init -reconfigure || true
+    log "☢️ STARTING JANITOR PROTOCOL: DEEP PURGE ENGAGED"
 
-    # 2. Extract Metadata to find the cluster
+    # 1. Recover Metadata via S3 State
+    cd "$TF_DIR"
+    log "Refreshing Terraform State..."
+    # -upgrade fixes the "Unreadable module directory" error by re-downloading modules
+    terraform init -reconfigure -upgrade > /dev/null || true
+    
     CLUSTER_NAME=$(terraform output -raw cluster_name 2>/dev/null || echo "neural-hypernova")
     REGION=$(terraform output -raw region 2>/dev/null || echo "us-east-1")
-    
-    # 3. Sync Kubeconfig (Fixes the localhost:8080 error)
-    log "Syncing context for cluster: $CLUSTER_NAME..."
+    VPC_ID=$(terraform output -raw vpc_id 2>/dev/null || echo "")
+
+    # 2. Sync Context
     aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER_NAME" 2>/dev/null || true
 
-    # 4. Delete Kubernetes Resources (The "Polite" Delete)
-    log "Removing K8s LoadBalancers and Ray Cluster..."
+    # 3. K8s Resource Purge (Triggering AWS cleanup)
+    log "Deleting K8s Resources..."
     kubectl delete -f "$K8S_DIR/ai-forge/ray-cluster.yaml" --ignore-not-found --timeout=30s || true
     kubectl delete svc hypernova-dashboard-lb --ignore-not-found --timeout=30s || true
     
-    # 5. Terraform Destroy (The "Structural" Delete)
+    # CRITICAL: Wait for AWS to notice the LoadBalancer is gone
+    log "⌛ Waiting 60s for AWS LoadBalancer detachment..."
+    sleep 60
+
+    # 4. Terraform Destruction
     log "Executing Terraform Destroy..."
     terraform destroy -auto-approve || true
 
-    # 6. Final Sweep: Hunting Orphaned ENIs (The "Dirty" Delete)
-    # These ENIs are what cause the "DependencyViolation" on Security Groups
-    log "Cleaning up orphaned Elastic Network Interfaces (ENIs)..."
-    ENIS=$(aws ec2 describe-network-interfaces --filters "Name=description,Values=*EKS*" "Name=status,Values=available" --query "NetworkInterfaces[*].NetworkInterfaceId" --output text)
-    for eni in $ENIS; do
-        log "Purging orphaned ENI: $eni"
-        aws ec2 delete-network-interface --network-interface-id "$eni" || true
-    done
+    # 5. THE JANITOR SWEEP (The Brute Force)
+    # If Terraform failed, we manually kill the ENIs and SGs using the VPC ID
+    if [ ! -z "$VPC_ID" ]; then
+        log "🧹 Hunting Orphaned Resources in VPC: $VPC_ID"
+        
+        # Kill all available ENIs in this VPC
+        ENIS=$(aws ec2 describe-network-interfaces --filters "Name=vpc-id,Values=$VPC_ID" --query "NetworkInterfaces[*].NetworkInterfaceId" --output text)
+        for eni in $ENIS; do
+            log "Force-deleting ENI: $eni"
+            aws ec2 delete-network-interface --network-interface-id "$eni" || true
+        done
 
-    # 7. Final Security Group Wipe
-    log "Purging remaining Security Groups..."
-    SGS=$(aws ec2 describe-security-groups --filters "Name=group-name,Values=*$CLUSTER_NAME*" --query "SecurityGroups[*].GroupId" --output text)
-    for sg in $SGS; do
-        log "Deleting SG: $sg"
-        aws ec2 delete-security-group --group-id "$sg" || true
-    done
+        # Kill all Security Groups in this VPC (except default)
+        SGS=$(aws ec2 describe-security-groups --filters "Name=vpc-id,Values=$VPC_ID" --query "SecurityGroups[?GroupName!='default'].GroupId" --output text)
+        for sg in $SGS; do
+            log "Force-deleting SG: $sg"
+            aws ec2 delete-security-group --group-id "$sg" || true
+        done
+    fi
 
-    log "🌑 ZERO TRACE REMAINING. HYPERNOVA EXTINGUISHED."
+    log "🌑 ZERO TRACE REMAINING. ACCOUNT IS CLEAN."
 }
 
 # --- ROUTER ---
