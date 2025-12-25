@@ -104,7 +104,7 @@ function demo() {
 
     # 1. Create Public Proxy (Avoiding Headless Service Collision)
     log "🌐 Provisioning Industrial NLB via AWS LBC..."
-cat <<EOF | kubectl apply -f -
+    kubectl apply -f - <<EOF
 apiVersion: v1
 kind: Service
 metadata:
@@ -113,12 +113,8 @@ metadata:
     service.beta.kubernetes.io/aws-load-balancer-type: external
     service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: instance
     service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
-    # Force the health check to hit the dashboard directly
-    service.beta.kubernetes.io/aws-load-balancer-healthcheck-port: "8265"
-    service.beta.kubernetes.io/aws-load-balancer-healthcheck-protocol: TCP
 spec:
   type: LoadBalancer
-  externalTrafficPolicy: Local # Preserves Client IP and ensures local routing
   selector:
     ray.io/node-type: head
   ports:
@@ -128,14 +124,27 @@ spec:
     targetPort: 8265
 EOF
 
-    # 2. AWS Propagation Wait
-    log "⏳ Phase 1: Waiting for DNS Assignment..."
+    # 3. Phase 1: DNS Assignment with Diagnostic Timeout
+    log "⏳ Phase 1: Waiting for DNS Assignment (60s Timeout)..."
     local ELB_DNS=""
-    while [ -z "$ELB_DNS" ]; do
+    local COUNTER=0
+    while [ -z "$ELB_DNS" ] && [ $COUNTER -lt 6 ]; do
         ELB_DNS=$(kubectl get svc hypernova-dashboard-lb -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
-        [ -z "$ELB_DNS" ] && sleep 10
+        if [ -z "$ELB_DNS" ]; then
+            log "Still waiting for DNS... ($((COUNTER*10))s)"
+            sleep 10
+            COUNTER=$((COUNTER+1))
+        fi
     done
-    log "DNS Identity Assigned: $ELB_DNS"
+
+    if [ -z "$ELB_DNS" ]; then
+        error_log "❌ DNS Assignment Timed Out. Checking Controller Health..."
+        echo "--- AWS LOAD BALANCER CONTROLLER LOGS ---"
+        kubectl logs -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --tail=20
+        echo "--- SERVICE EVENTS ---"
+        kubectl describe svc hypernova-dashboard-lb
+        exit 1
+    fi
 
     # 3. Global DNS Resolution Guard
     log "⏳ Phase 2: Waiting for Global DNS Propagation (NXDOMAIN Guard)..."
