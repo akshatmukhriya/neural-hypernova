@@ -32,21 +32,36 @@ function bootstrap() {
 # --- THE IGNITE ---
 function ignite() {
     bootstrap
-    log "🚀 Igniting Forge..."
+    log "🚀 Ignite Sequence: Neural Hypernova V1.2.1"
     cd "$TF_DIR"
     
-    # Force clean context
+    # 1. Force Clean Local Context
     rm -rf .terraform .terraform.lock.hcl
     [ -f "backend.tf" ] && rm -f "backend.tf"
     [ -f "outputs.tf" ] && rm -f "outputs.tf"
 
-    log "Initializing Terraform..."
-    # Execute using the array expansion
+    log "Initializing Terraform with Persistent State..."
     terraform init "${INIT_OPTS[@]}" -reconfigure
+
+    # --- THE GHOST HUNTER (The Unicorn Fix) ---
+    log "🔎 Checking for Ghost Infrastructure..."
+    if aws eks describe-cluster --name neural-hypernova --region us-east-1 > /dev/null 2>&1; then
+        log "⚠️ Ghost Cluster Detected! Syncing State..."
+        # We attempt to import the cluster into the state so Terraform 'owns' it again
+        # This prevents the 'AlreadyExists' error
+        terraform import "${INIT_OPTS[@]}" module.eks.aws_eks_cluster.this[0] neural-hypernova || log "Import skipped or failed, proceeding to apply..."
+    fi
+
+    log "Executing Infrastructure Synthesis..."
     terraform apply -auto-approve
 
+    # 2. Extract & Warm up
     NAME=$(terraform output -raw cluster_name)
-    aws eks update-kubeconfig --region us-east-1 --name "$NAME"
+    REGION=$(terraform output -raw region)
+    aws eks update-kubeconfig --region "$REGION" --name "$NAME"
+
+    log "⏳ Waiting for EKS Public API to warm up..."
+    sleep 30 
 
     # Operational Layers...
     helm repo add cilium https://helm.cilium.io/
@@ -79,35 +94,35 @@ function nuke() {
     log "☢️ STARTING SOVEREIGN ERASURE..."
     cd "$TF_DIR"
     
-    # Force clean context before re-init
-    rm -rf .terraform .terraform.lock.hcl
-    [ -f "backend.tf" ] && rm -f "backend.tf"
-    [ -f "outputs.tf" ] && rm -f "outputs.tf"
-    
+    # 1. Context Sync
     terraform init "${INIT_OPTS[@]}" -reconfigure || true
+    CLUSTER_NAME="neural-hypernova"
+    REGION="us-east-1"
     
-    VPC_ID=$(terraform output -raw vpc_id 2>/dev/null || aws ec2 describe-vpcs --filters "Name=tag:Name,Values=hypernova-vpc" --query "Vpcs[0].VpcId" --output text || echo "")
-
-    log "⚔️ Clearing Cloud LoadBalancers..."
-    kubectl delete svc hypernova-dashboard-lb --ignore-not-found --timeout=30s || true
+    # 2. Kill the Limbs (Node Groups) - Critical Fix
+    log "Dismantling Node Groups..."
+    NGS=$(aws eks list-nodegroups --cluster-name "$CLUSTER_NAME" --region "$REGION" --query "nodegroups" --output text 2>/dev/null || echo "")
+    for ng in $NGS; do
+        aws eks delete-nodegroup --cluster-name "$CLUSTER_NAME" --nodegroup-name "$ng" --region "$REGION" || true
+    done
     
-    # Kill the cluster first so it stops spawning ENIs
-    log "⚔️ Dismantling Cluster..."
-    CLUSTER_NAME=$(terraform output -raw cluster_name 2>/dev/null || echo "neural-hypernova")
-    aws eks delete-cluster --name "$CLUSTER_NAME" --region us-east-1 2>/dev/null || true
-    
-    if [ ! -z "$VPC_ID" ] && [ "$VPC_ID" != "None" ] && [ "$VPC_ID" != "null" ]; then
-        log "⚔️ Force-Detaching Network Interfaces in VPC $VPC_ID..."
-        ENIS=$(aws ec2 describe-network-interfaces --filters "Name=vpc-id,Values=$VPC_ID" --query "NetworkInterfaces[*].NetworkInterfaceId" --output text)
-        for eni in $ENIS; do
-            # We try to detach if it's in-use, then delete
-            aws ec2 delete-network-interface --network-interface-id "$eni" || true
-        done
+    if [ ! -z "$NGS" ]; then
+        log "Waiting for Node Groups to dissolve..."
+        sleep 60
     fi
 
-    log "⚔️ Final Infrastructure Destruction..."
+    # 3. Destroy Infrastructure
+    log "Executing Terraform Destroy..."
     terraform destroy -auto-approve || true
-    log "🌑 ZERO TRACE."
+
+    # 4. CLI Fallback (If TF failed, rip it out manually)
+    if aws eks describe-cluster --name "$CLUSTER_NAME" --region "$REGION" > /dev/null 2>&1; then
+        log "⚠️ Terraform failed to kill the cluster. Force-deleting via CLI..."
+        aws eks delete-cluster --name "$CLUSTER_NAME" --region "$REGION" || true
+        aws eks wait cluster-deleted --name "$CLUSTER_NAME" --region "$REGION" || true
+    fi
+
+    log "🌑 ZERO TRACE REMAINING."
 }
 
 # --- THE DEMO ---
