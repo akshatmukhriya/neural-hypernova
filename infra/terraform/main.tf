@@ -44,10 +44,26 @@ module "vpc" {
   enable_nat_gateway = true
   single_nat_gateway = true # Cost optimization for demo
 
-  public_subnet_tags = { "kubernetes.io/role/elb" = 1 }
-  private_subnet_tags = { 
+  public_subnet_tags = {
+    "kubernetes.io/role/elb" = 1
+  }
+  private_subnet_tags = {
     "kubernetes.io/role/internal-elb" = 1
-    "karpenter.sh/discovery"          = "neural-hypernova" 
+    "karpenter.sh/discovery"          = "neural-hypernova"
+  }
+}
+
+module "lb_role" {
+  source    = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
+  role_name = "aws-load-balancer-controller-hypernova"
+
+  attach_load_balancer_controller_policy = true
+
+  oidc_providers = {
+    main = {
+      provider_arn               = module.eks.oidc_provider_arn
+      namespace_service_accounts = ["kube-system:aws-load-balancer-controller"]
+    }
   }
 }
 

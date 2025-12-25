@@ -52,13 +52,16 @@ function ignite() {
       --wait || true
 
     # 6. AWS Load Balancer Controller (The Connectivity Bridge)
-    log "Deploying AWS Load Balancer Controller..."
-    # Install CRDs first
-    kubectl apply -k "github.com/aws/eks-charts/stable/aws-load-balancer-controller/crds?ref=master"
+    log "Deploying AWS Load Balancer Controller with IAM Role..."
+    # Get the Role ARN from Terraform
+    ROLE_ARN=$(cd "$TF_DIR" && terraform output -raw lb_controller_role_arn)
+
     helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
       --namespace kube-system \
       --set clusterName="$CLUSTER_NAME" \
       --set serviceAccount.create=true \
+      --set serviceAccount.name=aws-load-balancer-controller \
+      --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="$ROLE_ARN" \
       --set region="$REGION" \
       --set vpcId="$VPC_ID" \
       --wait
@@ -101,7 +104,7 @@ function demo() {
 
     # 1. Create Public Proxy (Avoiding Headless Service Collision)
     log "🌐 Provisioning Industrial NLB via AWS LBC..."
-    cat <<EOF | kubectl apply -f -
+cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: Service
 metadata:
@@ -110,13 +113,14 @@ metadata:
     service.beta.kubernetes.io/aws-load-balancer-type: external
     service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: instance
     service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+    # Force the health check to hit the dashboard directly
     service.beta.kubernetes.io/aws-load-balancer-healthcheck-port: "8265"
-    service.beta.kubernetes.io/aws-load-balancer-healthcheck-protocol: "tcp"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-protocol: TCP
 spec:
   type: LoadBalancer
+  externalTrafficPolicy: Local # Preserves Client IP and ensures local routing
   selector:
     ray.io/node-type: head
-    ray.io/cluster: hypernova-ray
   ports:
   - name: dashboard
     protocol: TCP
@@ -167,26 +171,47 @@ EOF
 # --- THE NUKE PROTOCOL (Total Erasure) ---
 function nuke() {
     log "☢️ Executing Scorched Earth Protocol..."
+    
+    # 1. Initialize Terraform to reach the S3 state
     cd "$TF_DIR"
-    
-    # Extract name before destruction
+    log "Re-initializing Terraform backend to recover state..."
+    terraform init -reconfigure || true
+
+    # 2. Extract Metadata to find the cluster
     CLUSTER_NAME=$(terraform output -raw cluster_name 2>/dev/null || echo "neural-hypernova")
+    REGION=$(terraform output -raw region 2>/dev/null || echo "us-east-1")
     
-    # 1. Workload Purge
-    kubectl delete -f "$K8S_DIR/ai-forge/ray-cluster.yaml" --ignore-not-found || true
-    kubectl delete svc hypernova-dashboard-lb --ignore-not-found || true
+    # 3. Sync Kubeconfig (Fixes the localhost:8080 error)
+    log "Syncing context for cluster: $CLUSTER_NAME..."
+    aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER_NAME" 2>/dev/null || true
+
+    # 4. Delete Kubernetes Resources (The "Polite" Delete)
+    log "Removing K8s LoadBalancers and Ray Cluster..."
+    kubectl delete -f "$K8S_DIR/ai-forge/ray-cluster.yaml" --ignore-not-found --timeout=30s || true
+    kubectl delete svc hypernova-dashboard-lb --ignore-not-found --timeout=30s || true
     
-    # 2. Infrastructure Destruction
+    # 5. Terraform Destroy (The "Structural" Delete)
+    log "Executing Terraform Destroy..."
     terraform destroy -auto-approve || true
-    
-    # 3. Final Resource Sweep (Kill orphaned Security Groups/ENIs)
-    log "Final Sweep of VPC Resources..."
+
+    # 6. Final Sweep: Hunting Orphaned ENIs (The "Dirty" Delete)
+    # These ENIs are what cause the "DependencyViolation" on Security Groups
+    log "Cleaning up orphaned Elastic Network Interfaces (ENIs)..."
+    ENIS=$(aws ec2 describe-network-interfaces --filters "Name=description,Values=*EKS*" "Name=status,Values=available" --query "NetworkInterfaces[*].NetworkInterfaceId" --output text)
+    for eni in $ENIS; do
+        log "Purging orphaned ENI: $eni"
+        aws ec2 delete-network-interface --network-interface-id "$eni" || true
+    done
+
+    # 7. Final Security Group Wipe
+    log "Purging remaining Security Groups..."
     SGS=$(aws ec2 describe-security-groups --filters "Name=group-name,Values=*$CLUSTER_NAME*" --query "SecurityGroups[*].GroupId" --output text)
     for sg in $SGS; do
-        aws ec2 delete-security-group --group-id $sg || true
+        log "Deleting SG: $sg"
+        aws ec2 delete-security-group --group-id "$sg" || true
     done
-    
-    log "🌑 ZERO TRACE REMAINING."
+
+    log "🌑 ZERO TRACE REMAINING. HYPERNOVA EXTINGUISHED."
 }
 
 # --- ROUTER ---

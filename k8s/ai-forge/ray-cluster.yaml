@@ -5,12 +5,18 @@ metadata:
 spec:
   rayVersion: '2.9.0'
   headGroupSpec:
-    rayStartParams: { "dashboard-host": "0.0.0.0" }
+    rayStartParams: 
+      dashboard-host: "0.0.0.0" # This MUST be 0.0.0.0
+      include-dashboard: "true"
     template:
       spec:
         containers:
           - name: ray-head
             image: rayproject/ray-ml:2.9.0-py310-gpu
+            ports:
+              - containerPort: 8265 # Dashboard
+              - containerPort: 6379 # GCS
+              - containerPort: 10001 # Client
             resources:
               limits: { cpu: "2", memory: "8Gi" }
   workerGroupSpecs:

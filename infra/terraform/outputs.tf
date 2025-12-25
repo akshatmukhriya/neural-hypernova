@@ -12,3 +12,7 @@ output "karpenter_node_role_arn" {
   description = "The ARN of the IAM role for Karpenter nodes"
   value       = module.eks.eks_managed_node_groups["brain"].iam_role_arn
 }
+
+output "lb_controller_role_arn" {
+   value = module.lb_role.iam_role_arn
+}
