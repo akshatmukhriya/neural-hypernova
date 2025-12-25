@@ -16,7 +16,7 @@ terraform {
 
   backend "s3" {
     # This must match the bucket you created
-    bucket = "hypernova-state-277047392590" 
+    bucket = "hypernova-state" 
     key    = "eks/terraform.tfstate"
     region = "us-east-1"
   }
