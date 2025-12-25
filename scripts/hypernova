@@ -68,30 +68,46 @@ function ignite() {
 function demo() {
     log "🔍 Discovering Hypernova Infrastructure..."
     
-    # 1. Self-Discovery (Crucial for GitHub Actions context)
+    # 1. Discovery & Sync
     cd "$TF_DIR"
     terraform init -reconfigure > /dev/null
     CLUSTER_NAME=$(terraform output -raw cluster_name 2>/dev/null || echo "neural-hypernova")
     REGION=$(terraform output -raw region 2>/dev/null || echo "us-east-1")
-    
-    log "Syncing Kubeconfig for $CLUSTER_NAME..."
     aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER_NAME"
 
     # 2. Trigger Workload
-    log "🎭 Injecting Distributed GPU Workload..."
-    kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml" # Ensure base cluster is up
-    
-    # 3. Expose Dashboard
-    log "🌐 Provisioning Public Access to Ray Dashboard..."
-    # We target the service created by the Ray Operator
-    kubectl patch svc raycluster-hypernova-ray-head-svc -p '{"spec": {"type": "LoadBalancer"}}'
+    log "🎭 Injecting/Verifying RayCluster..."
+    kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"
 
-    # 4. Wait & Report
+    # 3. Dynamic Service Discovery
+    log "🔎 Hunting for Ray Head Service..."
+    local RAY_SVC=""
+    # We poll for 60 seconds for the service to appear
+    for i in {1..12}; do
+        # We look for the service with the 'ray.io/node-type: head' label
+        RAY_SVC=$(kubectl get svc -l ray.io/node-type=head -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+        if [ ! -z "$RAY_SVC" ]; then
+            log "Found Ray Head Service: $RAY_SVC"
+            break
+        fi
+        log "Waiting for Ray Operator to spawn the Head Service... ($((i*5))s)"
+        sleep 5
+    done
+
+    if [ -z "$RAY_SVC" ]; then
+        error_log "Ray Head Service not found. Is the KubeRay Operator running?"
+        exit 1
+    fi
+
+    # 4. Expose Dashboard (The Patch)
+    log "🌐 Provisioning Public Access to $RAY_SVC..."
+    kubectl patch svc "$RAY_SVC" -p '{"spec": {"type": "LoadBalancer"}}'
+
+    # 5. Wait for NLB DNS
     log "⏳ Waiting for NLB Propagation (Observation Mode)..."
     local ELB_DNS=""
-    # Timeout after 2 minutes if NLB doesn't show up
     for i in {1..12}; do
-        ELB_DNS=$(kubectl get svc raycluster-hypernova-ray-head-svc -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+        ELB_DNS=$(kubectl get svc "$RAY_SVC" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
         if [ ! -z "$ELB_DNS" ]; then
             break
         fi
@@ -107,10 +123,6 @@ function demo() {
         echo "🚀 NEURAL HYPERNOVA IS LIVE"
         echo "----------------------------------------------------------------"
         echo "ACCESS UI: http://$ELB_DNS:8265"
-        echo "----------------------------------------------------------------"
-        echo "OBSERVATION COMMANDS:"
-        echo "1. Watch Nodes:  kubectl get nodes -l karpenter.sh/nodepool=gpu-forge"
-        echo "2. Watch Pods:   kubectl get pods -n default"
         echo "----------------------------------------------------------------"
         echo -e "${COLOR_RESET}"
     fi
