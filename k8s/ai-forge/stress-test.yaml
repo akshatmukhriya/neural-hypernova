@@ -1,0 +1,31 @@
+apiVersion: ray.io/v1
+kind: RayJob
+metadata:
+  name: hypernova-stress-test
+spec:
+  entrypoint: python -c "import ray; ray.init(); [ray.remote(num_gpus=1)(lambda: 1+1).remote() for _ in range(4)]; import time; time.sleep(300)"
+  rayClusterSpec:
+    rayVersion: '2.9.0'
+    headGroupSpec:
+      template:
+        spec:
+          containers:
+            - name: ray-head
+              image: rayproject/ray-ml:2.9.0-py310-gpu
+              resources:
+                limits: { cpu: "2", memory: "8Gi" }
+    workerGroupSpecs:
+      - replicas: 0 # Start at zero to show Karpenter's speed
+        minReplicas: 0
+        maxReplicas: 10
+        groupName: gpu-group
+        template:
+          spec:
+            containers:
+              - name: ray-worker
+                image: rayproject/ray-ml:2.9.0-py310-gpu
+                resources:
+                  limits:
+                    nvidia.com/gpu: 1
+                    cpu: "4"
+                    memory: "16Gi"

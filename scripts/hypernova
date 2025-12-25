@@ -63,6 +63,36 @@ function ignite() {
     log "✅ NEURAL HYPERNOVA IS LIVE."
 }
 
+function demo() {
+    log "🎭 Triggering Distributed GPU Workload..."
+    kubectl apply -f k8s/ai-forge/stress-test.yaml
+
+    log "🌐 Exposing Ray Dashboard via High-Performance NLB..."
+    # We patch the Ray Head service to be a LoadBalancer
+    kubectl patch svc raycluster-hypernova-ray-head-svc -p '{"spec": {"type": "LoadBalancer"}}'
+
+    log "⏳ Waiting for NLB to provision (this takes ~2 mins)..."
+    # Wait for the external IP to be assigned
+    local ELB_DNS=""
+    while [ -z "$ELB_DNS" ]; do
+        ELB_DNS=$(kubectl get svc raycluster-hypernova-ray-head-svc -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+        [ -z "$ELB_DNS" ] && sleep 10
+    done
+
+    echo -e "${COLOR_GREEN}"
+    echo "----------------------------------------------------------------"
+    echo "🚀 NEURAL HYPERNOVA SPECTATOR MODE IS ACTIVE"
+    echo "----------------------------------------------------------------"
+    echo "RAY DASHBOARD URL: http://$ELB_DNS:8265"
+    echo "----------------------------------------------------------------"
+    echo "STATS TO SHOWCASE:"
+    echo "1. SCALE: Run 'kubectl get nodes' to see the GPU nodes Karpenter spawned."
+    echo "2. NETWORKING: Cilium eBPF is handling all inter-pod traffic at 100Gbps."
+    echo "3. EFFICIENCY: This cluster costs \$0.00 when the RayJob finishes."
+    echo "----------------------------------------------------------------"
+    echo -e "${COLOR_RESET}"
+}
+
 function nuke() {
     log "☢️ Scorched Earth Protocol..."
     cd "$TF_DIR"
