@@ -5,38 +5,36 @@ set -e
 TF_DIR="infra/terraform"
 
 function ignite() {
-    echo "[HYPERNOVA] Initiating Infrastructure..."
-    
-    # 1. Terraform Deployment
-    cd $TF_DIR
+    log "Initiating Infrastructure Provisioning..."
+    cd infra/terraform
     terraform init
     terraform apply -auto-approve
-    
-    # 2. Extract Cluster Name from Terraform Output (The Pro way)
-    # This prevents the "ResourceNotFound" error
-    CLUSTER_NAME=$(terraform output -raw cluster_name)
-    REGION=$(terraform output -raw region)
-    
-    echo "[HYPERNOVA] Syncing Kubeconfig for $CLUSTER_NAME..."
-    aws eks update-kubeconfig --region $REGION --name $CLUSTER_NAME
-    
-    # 3. Add Helm Repos
+
+    log "Extracting Architectural Metadata..."
+    # The '|| echo "neural-hypernova"' is a safety fallback
+    CLUSTER_NAME=$(terraform output -raw cluster_name 2>/dev/null || echo "neural-hypernova")
+    REGION=$(terraform output -raw region 2>/dev/null || echo "us-east-1")
+
+    log "Syncing Kubeconfig for Cluster: $CLUSTER_NAME in $REGION..."
+    aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER_NAME"
+
+    # Verify connection
+    kubectl get nodes
+
+    log "Injecting High-Performance Components..."
+    # Helm commands follow...
     helm repo add cilium https://helm.cilium.io/
     helm repo add karpenter https://charts.karpenter.sh/
     helm repo update
 
-    # 4. Deploy High-Performance Core
-    echo "[HYPERNOVA] Injecting eBPF Data Plane & Karpenter..."
-    # (Rest of your helm install commands here...)
-    
-    echo "[HYPERNOVA] CLUSTER ONLINE."
-}
+    # Optimized Cilium Install for AI (Bypassing Kube-Proxy)
+    helm upgrade --install cilium cilium/cilium --version 1.15.5 \
+      --namespace kube-system \
+      --set kubeProxyReplacement=true \
+      --set k8sServiceHost=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}') \
+      --set k8sServicePort=6443
 
-function nuke() {
-    echo "[HYPERNOVA] SCORCHED EARTH PROTOCOL..."
-    # Same as before, but navigate to $TF_DIR first
-    cd $TF_DIR
-    terraform destroy -auto-approve
+    log "HYPERNOVA CLUSTER IS ARMED."
 }
 
 case "$1" in
