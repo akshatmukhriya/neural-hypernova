@@ -1,60 +1,60 @@
 #!/bin/bash
 set -e
 
-# --- ANCHOR THE PATHS ---
-# This finds the root of your repo regardless of where you run the script
+# --- PATHS ---
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 TF_DIR="$ROOT_DIR/infra/terraform"
 K8S_DIR="$ROOT_DIR/k8s"
 
 COLOR_CYAN='\033[0;36m'
-COLOR_GREEN='\033[0;32m'
 COLOR_RESET='\033[0m'
-
 function log() { echo -e "${COLOR_CYAN}[HYPERNOVA-LOG] $1${COLOR_RESET}"; }
 
 function ignite() {
-    log "🚀 Ignite Sequence Started..."
+    log "🚀 Ignite Sequence: Neural Hypernova V1.1.1"
 
-    # 1. Terraform Deployment
+    # 1. Terraform
     cd "$TF_DIR"
-    log "Applying Infrastructure at $TF_DIR..."
     terraform init -reconfigure
     terraform apply -auto-approve
 
-    # 2. Extract Metadata
+    # 2. Metadata
     CLUSTER_NAME=$(terraform output -raw cluster_name)
     REGION=$(terraform output -raw region)
-    log "Metadata Extracted: Cluster=$CLUSTER_NAME, Region=$REGION"
-
-    # 3. Kubeconfig Sync
+    
+    # 3. Kubeconfig
     aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER_NAME"
 
-    # 4. Helm & K8s Injection
-    log "Registering Repos..."
+    # 4. Helm Repos
     helm repo add cilium https://helm.cilium.io/
-    helm repo add karpenter https://charts.karpenter.sh/
     helm repo add kuberay https://ray-project.github.io/kuberay-helm/
     helm repo update
 
-    log "Injecting Cilium (eBPF Data Plane)..."
-    helm upgrade --install cilium cilium/cilium --version 1.16.1 \
+    # 5. Cilium (Fixed Template Error)
+    log "Injecting Cilium 1.16.5 (eBPF Data Plane)..."
+    helm upgrade --install cilium cilium/cilium --version 1.16.5 \
       --namespace kube-system \
       --set kubeProxyReplacement=true \
-      --wait || true # Don't let cilium restart timeout kill the script
+      --set debug.enabled=false \
+      --set debug.verbose="null" \
+      --wait || true
 
-    log "Injecting Karpenter (The Scaler)..."
+    # 6. Karpenter (Updated to v1.1.1 - The New Standard)
+    log "Injecting Karpenter v1.1.1..."
+    # No 'v' in the version string for Helm OCI
     helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter \
-      --version v0.35.0 \
+      --version 1.1.1 \
       --namespace karpenter --create-namespace \
-      --set settings.aws.clusterName="$CLUSTER_NAME" \
-      --set settings.aws.defaultInstanceProfile="KarpenterNodeInstanceProfile-$CLUSTER_NAME"
+      --set settings.clusterName="$CLUSTER_NAME" \
+      --set controller.groupKindConcurrency.Job.k8s.io/v1=1 \
+      --wait
 
+    # 7. KubeRay
     log "Deploying KubeRay Operator..."
-    helm upgrade --install kuberay-operator kuberay/kuberay-operator --version 1.0.0
+    helm upgrade --install kuberay-operator kuberay/kuberay-operator --version 1.2.2
 
-    # 5. Apply Workloads (Using Absolute Paths)
-    log "Applying GPU Forge Manifests..."
+    # 8. Manifests
+    log "Applying AI Forge Workloads..."
     kubectl apply -f "$K8S_DIR/core/karpenter-gpu-pool.yaml"
     kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"
 
