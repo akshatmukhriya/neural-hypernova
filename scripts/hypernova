@@ -21,13 +21,17 @@ function error_log() {
 function ignite() {
     log "🧹 Executing Pre-Flight Ghost Sweep..."
     
-    # 1. Kill Lingering CloudWatch Log Group
-    aws logs delete-log-group --log-group-name "/aws/eks/neural-hypernova/cluster" 2>/dev/null || true
+    # Delete the log group directly via CLI before Terraform starts
+    # We use --region explicitly to ensure no cross-region confusion
+    aws logs delete-log-group --log-group-name "/aws/eks/neural-hypernova/cluster" --region us-east-1 2>/dev/null || true
     
-    # 2. Kill Lingering KMS Alias
-    aws kms delete-alias --alias-name "alias/eks/neural-hypernova" 2>/dev/null || true
+    # Also kill the KMS alias just in case
+    aws kms delete-alias --alias-name "alias/eks/neural-hypernova" --region us-east-1 2>/dev/null || true
     
     log "Initiating Sovereign AI Forge Deployment..."
+    cd "$TF_DIR"
+    terraform init -reconfigure # Force re-init to catch backend/module changes
+    terraform apply -auto-approve
 
     # 1. Terraform Infrastructure
     if [ ! -d "$TF_DIR" ]; then

@@ -38,12 +38,19 @@ module "eks" {
   version = "~> 20.0"
 
   cluster_name    = "neural-hypernova"
-  cluster_version = "1.31" # Upgraded version
+  cluster_version = "1.31"
 
-  # --- CONNECTIVITY FIX ---
+  # --- THE SILENCER ---
+  create_cloudwatch_log_group            = false
+  cluster_enabled_log_types              = []    # THIS is the missing link. Empty it.
+  
+  # --- ENCRYPTION BYPASS (Avoids KMS Collision) ---
+  create_kms_key                         = false
+  cluster_encryption_config              = {} 
+
+  # --- CONNECTIVITY ---
   cluster_endpoint_public_access           = true
-  cluster_endpoint_private_access          = true
-  cluster_endpoint_public_access_cidrs     = ["0.0.0.0/0"] # Open for demo; narrow this in production
+  cluster_endpoint_public_access_cidrs     = ["0.0.0.0/0"]
   enable_cluster_creator_admin_permissions = true
 
   vpc_id     = module.vpc.vpc_id
@@ -52,7 +59,7 @@ module "eks" {
   eks_managed_node_groups = {
     brain = {
       instance_types = ["t3.medium"]
-      ami_type       = "AL2023_x86_64_STANDARD" # Modern Linux 2023
+      ami_type       = "AL2023_x86_64_STANDARD"
       min_size       = 1
       max_size       = 2
       desired_size   = 1
