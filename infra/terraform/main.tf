@@ -86,12 +86,21 @@ module "eks" {
   cluster_name    = "neural-hypernova"
   cluster_version = "1.31"
 
-  vpc_id     = module.vpc.vpc_id
-  subnet_ids = module.vpc.private_subnets
+  # --- THE VISIBILITY FIX ---
+  cluster_endpoint_public_access  = true
+  cluster_endpoint_private_access = true # Allow internal inter-node talk
+  
+  # Ensure the runner can always see the cluster
+  cluster_endpoint_public_access_cidrs = ["0.0.0.0/0"] 
 
+  # No logs, no KMS collisions
   create_cloudwatch_log_group = false
   cluster_enabled_log_types   = []
-  authentication_mode         = "API_AND_CONFIG_MAP"
+  create_kms_key              = false
+  cluster_encryption_config   = {} 
+
+  vpc_id     = module.vpc.vpc_id
+  subnet_ids = module.vpc.private_subnets
 
   eks_managed_node_groups = {
     brain = {
