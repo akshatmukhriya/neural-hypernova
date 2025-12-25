@@ -57,10 +57,13 @@ function ignite() {
     log "Deploying KubeRay Operator..."
     helm upgrade --install kuberay-operator kuberay/kuberay-operator --version 1.2.2
 
-    log "Injecting NVIDIA Device Plugin..."
-        helm upgrade --install nvidia-device-plugin nvidia/nvidia-device-plugin \
-          --namespace kube-system \
-          --set-string gfd.enabled=true
+    log "Injecting NVIDIA GPU Discovery Plugin..."
+    helm repo add nvdp https://nvidia.github.io/k8s-device-plugin
+    helm repo update
+    helm upgrade --install nvidia-device-plugin nvdp/nvidia-device-plugin \
+      --namespace kube-system \
+      --set gfd.enabled=true \
+      --wait
 
     # 8. Manifests
     log "Applying AI Forge Workloads..."
