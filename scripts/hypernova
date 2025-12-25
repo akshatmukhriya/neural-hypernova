@@ -5,13 +5,14 @@ set -e
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 TF_DIR="$ROOT_DIR/infra/terraform"
 K8S_DIR="$ROOT_DIR/k8s"
+
 COLOR_CYAN='\033[0;36m'
 COLOR_GREEN='\033[0;32m'
 COLOR_RESET='\033[0m'
 
 function log() { echo -e "${COLOR_CYAN}[HYPERNOVA] $1${COLOR_RESET}"; }
 
-# --- THE BOOTSTRAP (The Long-Run Fix) ---
+# --- THE BOOTSTRAP ---
 function bootstrap() {
     log "📡 Detecting Cloud Context..."
     ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
@@ -23,7 +24,9 @@ function bootstrap() {
         aws s3 mb "s3://$BUCKET" --region $REGION
         aws s3api put-bucket-versioning --bucket "$BUCKET" --versioning-configuration Status=Enabled
     fi
-    INIT_ARGS="-backend-config=\"bucket=$BUCKET\""
+    
+    # THE UNICORN FIX: Use a Bash Array for clean argument passing
+    INIT_OPTS=(-backend-config="bucket=$BUCKET")
 }
 
 # --- THE IGNITE ---
@@ -31,22 +34,29 @@ function ignite() {
     bootstrap
     log "🚀 Igniting Forge..."
     cd "$TF_DIR"
-    [ -f "backend.tf" ] && rm -f "backend.tf" # Kill the ghost
-    terraform init $INIT_ARGS -reconfigure
+    
+    # Force clean context
+    rm -rf .terraform .terraform.lock.hcl
+    [ -f "backend.tf" ] && rm -f "backend.tf"
+    [ -f "outputs.tf" ] && rm -f "outputs.tf"
+
+    log "Initializing Terraform..."
+    # Execute using the array expansion
+    terraform init "${INIT_OPTS[@]}" -reconfigure
     terraform apply -auto-approve
 
     NAME=$(terraform output -raw cluster_name)
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
 
-    log "🛠️ Injecting Operational Layers..."
+    # Operational Layers...
     helm repo add cilium https://helm.cilium.io/
     helm repo add eks https://aws.github.io/eks-charts
+    helm repo add ray-project https://ray-project.github.io/kuberay-helm/
     helm repo update
 
-    log "Injecting Cilium eBPF..."
+    log "Injecting Core Infrastructure Layers..."
     helm upgrade --install cilium cilium/cilium --version 1.16.5 -n kube-system --set kubeProxyReplacement=true --wait
-
-    log "Injecting AWS Load Balancer Controller..."
+    
     ROLE_ARN=$(terraform output -raw lb_role_arn)
     VPC_ID=$(terraform output -raw vpc_id)
     kubectl apply -k "github.com/aws/eks-charts/stable/aws-load-balancer-controller/crds?ref=master"
@@ -55,35 +65,47 @@ function ignite() {
       --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="$ROLE_ARN" \
       --set region=us-east-1 --set vpcId="$VPC_ID" --wait
 
-    log "Injecting Karpenter & Ray..."
     helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter --version 1.1.1 -n karpenter --create-namespace --set settings.clusterName="$NAME" --wait
-    helm upgrade --install kuberay-operator ray-project/kuberay-operator --version 1.2.2
+    helm upgrade --install kuberay-operator ray-project/kuberay-operator --version 1.2.2 -n default
     
     kubectl apply -f "$K8S_DIR/core/karpenter-gpu-pool.yaml"
     kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"
     log "✅ FORGE ONLINE."
 }
 
-# --- THE NUKE (Scorched Earth) ---
+# --- THE NUKE ---
 function nuke() {
     bootstrap
     log "☢️ STARTING SOVEREIGN ERASURE..."
     cd "$TF_DIR"
+    
+    # Force clean context before re-init
+    rm -rf .terraform .terraform.lock.hcl
     [ -f "backend.tf" ] && rm -f "backend.tf"
-    terraform init $INIT_ARGS -reconfigure || true
+    [ -f "outputs.tf" ] && rm -f "outputs.tf"
+    
+    terraform init "${INIT_OPTS[@]}" -reconfigure || true
     
     VPC_ID=$(terraform output -raw vpc_id 2>/dev/null || aws ec2 describe-vpcs --filters "Name=tag:Name,Values=hypernova-vpc" --query "Vpcs[0].VpcId" --output text || echo "")
 
-    log "⚔️ Clearing K8s LBs & Detaching Infrastructure..."
+    log "⚔️ Clearing Cloud LoadBalancers..."
     kubectl delete svc hypernova-dashboard-lb --ignore-not-found --timeout=30s || true
     
-    # Critical: Kill ENIs that block VPC deletion
-    if [ ! -z "$VPC_ID" ] && [ "$VPC_ID" != "None" ]; then
-        log "Hunting ENIs in VPC $VPC_ID..."
+    # Kill the cluster first so it stops spawning ENIs
+    log "⚔️ Dismantling Cluster..."
+    CLUSTER_NAME=$(terraform output -raw cluster_name 2>/dev/null || echo "neural-hypernova")
+    aws eks delete-cluster --name "$CLUSTER_NAME" --region us-east-1 2>/dev/null || true
+    
+    if [ ! -z "$VPC_ID" ] && [ "$VPC_ID" != "None" ] && [ "$VPC_ID" != "null" ]; then
+        log "⚔️ Force-Detaching Network Interfaces in VPC $VPC_ID..."
         ENIS=$(aws ec2 describe-network-interfaces --filters "Name=vpc-id,Values=$VPC_ID" --query "NetworkInterfaces[*].NetworkInterfaceId" --output text)
-        for eni in $ENIS; do aws ec2 delete-network-interface --network-interface-id $eni || true; done
+        for eni in $ENIS; do
+            # We try to detach if it's in-use, then delete
+            aws ec2 delete-network-interface --network-interface-id "$eni" || true
+        done
     fi
 
+    log "⚔️ Final Infrastructure Destruction..."
     terraform destroy -auto-approve || true
     log "🌑 ZERO TRACE."
 }
