@@ -1,42 +1,3 @@
-# --- 1. KubeRay Operator (The Manager) ---
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: ray-system
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: kuberay-operator
-  namespace: ray-system
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: kuberay
-  template:
-    metadata:
-      labels:
-        app.kubernetes.io/name: kuberay
-    spec:
-      serviceAccountName: kuberay-operator
-      containers:
-      - name: kuberay-operator
-        image: kuberay/operator:v1.0.0
-        resources:
-          limits:
-            cpu: 100m
-            memory: 128Mi
-          requests:
-            cpu: 100m
-            memory: 128Mi
----
-# (Skipping huge CRD definitions for brevity - assuming standard KubeRay Helm install or simplified CR usage)
-# FOR THIS DEMO: We will use a "Headless" Ray setup if CRDs are tricky to manage in raw YAML.
-# BUT, to be a Unicorn, let's use the native RayCluster CR.
-# NOTE: ArgoCD might complain if CRDs aren't there. 
-# SIMPLIFIED APPROACH for One-Click: Standard Deployment 
-
 apiVersion: v1
 kind: Service
 metadata:
@@ -46,6 +7,9 @@ metadata:
     ray.io/node-type: head
 spec:
   ports:
+  - name: redis
+    port: 6379
+    targetPort: 6379
   - name: dashboard
     port: 8265
     targetPort: 8265
@@ -75,21 +39,40 @@ spec:
         image: rayproject/ray:2.9.0
         command: [ "/bin/bash", "-c", "--" ]
         args:
-          - "ray start --head --dashboard-host=0.0.0.0 --block" 
+          # Cap object store at 1GB, disable usage stats to save network/cpu
+          - "ray start --head --dashboard-host=0.0.0.0 --port=6379 --object-store-memory=1073741824 --disable-usage-stats --block" 
+        volumeMounts:
+        - mountPath: /dev/shm
+          name: dshm     
         resources:
           requests:
-            cpu: 500m 
-            memory: 1Gi
+            cpu: "1"
+            memory: "4Gi"   # Give it MAXIMUM power
+          limits:       
+            cpu: "1"
+            memory: "4Gi"
         ports:
-        - containerPort: 8265 # Dashboard
+        - containerPort: 8265
+        - containerPort: 6379
+        # ADDED PROBE: Don't kill it if it's slow to start
+        livenessProbe:
+          tcpSocket:
+            port: 8265
+          initialDelaySeconds: 30
+          periodSeconds: 10
+      volumes:
+      - name: dshm
+        emptyDir:
+          medium: Memory
 ---
+# WORKERS DISABLED FOR STABILITY TEST
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: ray-worker
   namespace: default
 spec:
-  replicas: 3 # THE SCALE (3 Workers)
+  replicas: 0  
   selector:
     matchLabels:
       ray.io/node-type: worker
@@ -103,8 +86,15 @@ spec:
         image: rayproject/ray:2.9.0
         command: [ "/bin/bash", "-c", "--" ]
         args:
-          - "ray start --address=ray-head:6379 --block"
+          - "ray start --address=ray-head:6379 --object-store-memory=536870912 --block"
         resources:
           requests:
-            cpu: 500m
-            memory: 1Gi
+            cpu: "500m"
+            memory: "1Gi"
+        volumeMounts:
+        - mountPath: /dev/shm
+          name: dshm
+      volumes:
+      - name: dshm
+        emptyDir:
+          medium: Memory

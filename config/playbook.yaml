@@ -19,7 +19,7 @@
     # 2. INSTALL ARGOCD (The Engine)
     - name: Install ArgoCD (Lite Edition) via Kustomize
       ansible.builtin.shell:
-        cmd: "kubectl apply -k ."
+        cmd: "kubectl apply -k . --kubeconfig '{{ kubeconfig_path }}'"
         chdir: "{{ playbook_dir }}/argocd-lite"
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
