@@ -1,0 +1,33 @@
+apiVersion: karpenter.sh/v1beta1
+kind: NodePool
+metadata:
+  name: gpu-forge
+spec:
+  template:
+    spec:
+      requirements:
+        - key: "karpenter.sh/capacity-type"
+          operator: In
+          values: ["spot", "on-demand"] # Try spot first to save 70%
+        - key: "node.kubernetes.io/instance-type"
+          operator: In
+          values: ["p4d.24xlarge", "p5.48xlarge", "g5.4xlarge"] 
+      nodeClassRef:
+        name: default
+  limits:
+    cpu: 1000
+    memory: 4000Gi
+---
+apiVersion: karpenter.sh/v1beta1
+kind: EC2NodeClass
+metadata:
+  name: default
+spec:
+  amiFamily: AL2
+  role: "KarpenterNodeRole-neural-hypernova" # Created by Terraform
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: "neural-hypernova"
+  securityGroupSelectorTerms:
+    - tags:
+        kubernetes.io/cluster/neural-hypernova: "owned"

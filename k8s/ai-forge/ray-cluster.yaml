@@ -1,0 +1,31 @@
+apiVersion: ray.io/v1
+kind: RayCluster
+metadata:
+  name: hypernova-ray
+spec:
+  rayVersion: '2.9.0'
+  headGroupSpec:
+    rayStartParams: { "dashboard-host": "0.0.0.0" }
+    template:
+      spec:
+        containers:
+          - name: ray-head
+            image: rayproject/ray-ml:2.9.0-py310-gpu
+            resources:
+              limits: { cpu: "2", memory: "8Gi" }
+  workerGroupSpecs:
+    - replicas: 2 # Scale this to 1000 for a real demo
+      groupName: gpu-group
+      rayStartParams: {}
+      template:
+        spec:
+          runtimeClassName: nvidia # Uses NVIDIA runtime
+          containers:
+            - name: ray-worker
+              image: rayproject/ray-ml:2.9.0-py310-gpu
+              resources:
+                limits:
+                  nvidia.com/gpu: 1
+                  cpu: "4"
+                  memory: "16Gi"
+                  

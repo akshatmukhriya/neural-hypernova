@@ -1,0 +1,41 @@
+#!/bin/bash
+set -e
+
+COLOR_CYAN='\033[0;36m'
+COLOR_RESET='\033[0m'
+
+function log() { echo -e "${COLOR_CYAN}[HYPERNOVA] $1${COLOR_RESET}"; }
+
+case "$1" in
+  ignite)
+    log "Initiating Infrastructure Provisioning..."
+    cd infra/terraform && terraform init && terraform apply -auto-approve
+    
+    log "Configuring K8s Access..."
+    aws eks update-kubeconfig --region us-east-1 --name neural-hypernova
+
+    log "Installing Cilium (eBPF Data Plane)..."
+    helm install cilium cilium/cilium --version 1.15.5 --namespace kube-system --set kubeProxyReplacement=true
+
+    log "Installing Karpenter (The Scaler)..."
+    helm install karpenter oci://public.ecr.aws/karpenter/karpenter --namespace karpenter --create-namespace --set settings.aws.clusterName=neural-hypernova
+
+    log "Deploying NodePools & AI Forge..."
+    kubectl apply -f ../../k8s/core/karpenter-gpu-pool.yaml
+    kubectl apply -f ../../k8s/ai-forge/ray-cluster.yaml
+    
+    log "HYPERNOVA IS LIVE. POWERING UP GPUs..."
+    ;;
+
+  nuke)
+    log "SCORCHED EARTH PROTOCOL ENGAGED..."
+    kubectl delete raycluster hypernova-ray || true
+    cd infra/terraform && terraform destroy -auto-approve
+    
+    log "Sweeping Orphaned Resources..."
+    # Kill any dangling LBs or Volumes
+    aws ec2 describe-volumes --filters Name=tag:kubernetes.io/cluster/neural-hypernova,Values=owned --query "Volumes[*].VolumeId" --output text | xargs -I {} aws ec2 delete-volume --volume-id {} || true
+    
+    log "ZERO TRACE REMAINING. SYSTEM EXTINGUISHED."
+    ;;
+esac

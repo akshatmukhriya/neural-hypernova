@@ -1,0 +1,27 @@
+name: Neural Hypernova Lifecycle
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'ignite or nuke'
+        required: true
+        default: 'ignite'
+
+jobs:
+  hypernova:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # Required for OIDC
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACC_ID }}:role/HypernovaGitHubRole
+          aws-region: us-east-1
+      - name: Install Tools
+        run: |
+          # Install Terraform, Kubectl, Helm
+      - name: Execute Jockey
+        run: ./scripts/hypernova ${{ github.event.inputs.action }}
