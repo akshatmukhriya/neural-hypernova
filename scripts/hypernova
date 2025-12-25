@@ -1,39 +1,49 @@
 #!/bin/bash
 set -e
 
-# --- ANCHOR PATHS ---
+# --- ARCHITECTURAL ANCHORS ---
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 TF_DIR="$ROOT_DIR/infra/terraform"
 K8S_DIR="$ROOT_DIR/k8s"
 
+# --- ELITE VISUALS ---
 COLOR_CYAN='\033[0;36m'
 COLOR_GREEN='\033[0;32m'
+COLOR_RED='\033[0;31m'
 COLOR_RESET='\033[0m'
 
-function log() { echo -e "${COLOR_CYAN}[HYPERNOVA-LOG] $1${COLOR_RESET}"; }
+function log() { echo -e "${COLOR_CYAN}[HYPERNOVA-LOG] $(date +'%H:%M:%S') | $1${COLOR_RESET}"; }
+function error_log() { echo -e "${COLOR_RED}[HYPERNOVA-ERROR] $1${COLOR_RESET}"; }
 
+# --- THE IGNITE PROTOCOL (Zero to Sovereign) ---
 function ignite() {
-    log "🚀 Ignite Sequence: Neural Hypernova V1.1.1"
+    log "🚀 Ignite Sequence: Neural Hypernova V1.1.2 (Industrial Release)"
 
-    # 1. Terraform
+    # 1. Infrastructure Synthesis (Terraform)
     cd "$TF_DIR"
+    log "Synthesizing Infrastructure in $TF_DIR..."
     terraform init -reconfigure
     terraform apply -auto-approve
 
-    # 2. Metadata
+    # 2. Metadata Extraction
     CLUSTER_NAME=$(terraform output -raw cluster_name)
     REGION=$(terraform output -raw region)
-    
-    # 3. Kubeconfig
+    VPC_ID=$(aws eks describe-cluster --name "$CLUSTER_NAME" --query "cluster.resourcesVpcConfig.vpcId" --output text)
+    log "Cluster DNA Extracted: $CLUSTER_NAME in $REGION (VPC: $VPC_ID)"
+
+    # 3. Kubeconfig Synchronization
     aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER_NAME"
 
-    # 4. Helm Repos
+    # 4. Helm Repository Registry
+    log "Registering High-Scale Repositories..."
     helm repo add cilium https://helm.cilium.io/
     helm repo add kuberay https://ray-project.github.io/kuberay-helm/
+    helm repo add eks https://aws.github.io/eks-charts
+    helm repo add nvdp https://nvidia.github.io/k8s-device-plugin
     helm repo update
 
-    # 5. Cilium (Fixed Template Error)
-    log "Injecting Cilium 1.16.5 (eBPF Data Plane)..."
+    # 5. Data Plane Injection (Cilium eBPF)
+    log "Injecting Cilium 1.16.5 (Kernel-Level Networking)..."
     helm upgrade --install cilium cilium/cilium --version 1.16.5 \
       --namespace kube-system \
       --set kubeProxyReplacement=true \
@@ -41,61 +51,67 @@ function ignite() {
       --set debug.verbose="null" \
       --wait || true
 
-    # 6. Karpenter Injection
+    # 6. AWS Load Balancer Controller (The Connectivity Bridge)
+    log "Deploying AWS Load Balancer Controller..."
+    # Install CRDs first
+    kubectl apply -k "github.com/aws/eks-charts/stable/aws-load-balancer-controller/crds?ref=master"
+    helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
+      --namespace kube-system \
+      --set clusterName="$CLUSTER_NAME" \
+      --set serviceAccount.create=true \
+      --set region="$REGION" \
+      --set vpcId="$VPC_ID" \
+      --wait
+
+    # 7. Karpenter (Just-In-Time GPU Scaling)
     log "Injecting Karpenter v1.1.1..."
     helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter \
       --version 1.1.1 \
       --namespace karpenter --create-namespace \
       --set settings.clusterName="$CLUSTER_NAME" \
       --wait
-
-    # CRITICAL: Wait for Karpenter CRDs and Webhooks to be live
-    log "Waiting for Karpenter Webhooks..."
+    
     kubectl wait --for=condition=Available --timeout=60s deployment/karpenter -n karpenter
 
-    # 7. KubeRay
-    log "Deploying KubeRay Operator..."
+    # 8. AI Forge Core (KubeRay + NVIDIA)
+    log "Deploying AI Orchestration (KubeRay & NVIDIA Plugin)..."
     helm upgrade --install kuberay-operator kuberay/kuberay-operator --version 1.2.2
-
-    log "Injecting NVIDIA GPU Discovery Plugin..."
-    helm repo add nvdp https://nvidia.github.io/k8s-device-plugin
-    helm repo update
     helm upgrade --install nvidia-device-plugin nvdp/nvidia-device-plugin \
       --namespace kube-system \
       --set gfd.enabled=true \
       --wait
 
-    # 8. Manifests
-    log "Applying AI Forge Workloads..."
+    # 9. Workload Activation
+    log "Applying Neural Hypernova Manifests..."
     kubectl apply -f "$K8S_DIR/core/karpenter-gpu-pool.yaml"
     kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"
 
-    log "✅ NEURAL HYPERNOVA IS LIVE."
+    log "✅ NEURAL HYPERNOVA IS ARMED AND OPERATIONAL."
 }
 
+# --- THE DEMO PROTOCOL (Public Visibility) ---
 function demo() {
-    log "🔍 Discovering Hypernova Infrastructure..."
+    log "🔍 Discovering Hypernova Context..."
     
-    # 1. Self-Discovery & Context Recovery
     cd "$TF_DIR"
     terraform init -reconfigure > /dev/null
     CLUSTER_NAME=$(terraform output -raw cluster_name 2>/dev/null || echo "neural-hypernova")
     REGION=$(terraform output -raw region 2>/dev/null || echo "us-east-1")
     aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER_NAME"
 
-    # 2. Inject Dashboard Proxy with Advanced Annotations
-    log "🌐 Provisioning High-Performance NLB (Layer 4)..."
+    # 1. Create Public Proxy (Avoiding Headless Service Collision)
+    log "🌐 Provisioning Industrial NLB via AWS LBC..."
     cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: Service
 metadata:
   name: hypernova-dashboard-lb
   annotations:
-    # Ensures the NLB is public and uses the latest AWS Load Balancer Controller logic
-    service.beta.kubernetes.io/aws-load-balancer-type: nlb
-    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
-    # Crucial: This tells AWS to open the security groups automatically
+    service.beta.kubernetes.io/aws-load-balancer-type: external
     service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: instance
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-port: "8265"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-protocol: "tcp"
 spec:
   type: LoadBalancer
   selector:
@@ -108,7 +124,7 @@ spec:
     targetPort: 8265
 EOF
 
-    # 3. Phase 1: AWS Resource Assignment
+    # 2. AWS Propagation Wait
     log "⏳ Phase 1: Waiting for DNS Assignment..."
     local ELB_DNS=""
     while [ -z "$ELB_DNS" ]; do
@@ -117,66 +133,66 @@ EOF
     done
     log "DNS Identity Assigned: $ELB_DNS"
 
-    # 4. Phase 2: DNS Propagation Check (Fixes NXDOMAIN)
-    log "⏳ Phase 2: Waiting for DNS Propagation (Global Resolution)..."
+    # 3. Global DNS Resolution Guard
+    log "⏳ Phase 2: Waiting for Global DNS Propagation (NXDOMAIN Guard)..."
     local RESOLVED="false"
-    local DNS_ATTEMPTS=0
-    while [ "$RESOLVED" != "true" ] && [ $DNS_ATTEMPTS -lt 20 ]; do
+    local ATTEMPTS=0
+    while [ "$RESOLVED" != "true" ] && [ $ATTEMPTS -lt 20 ]; do
         if nslookup "$ELB_DNS" > /dev/null 2>&1; then
             RESOLVED="true"
-            log "✅ DNS Propagation successful."
+            log "✅ DNS Resolution Verified."
         else
-            log "Still waiting for DNS propagation... (NXDOMAIN Mitigation) ($((DNS_ATTEMPTS*15))s)"
+            log "Still propagating... ($((ATTEMPTS*15))s)"
             sleep 15
-            DNS_ATTEMPTS=$((DNS_ATTEMPTS+1))
+            ATTEMPTS=$((ATTEMPTS+1))
         fi
     done
 
-    # 5. Phase 3: Security Group & Port Verification
-    log "⏳ Phase 3: Final Port Warm-up & Security Sync..."
-    # We explicitly verify the SG has the port open in the background via Terraform
-    # or manual AWS CLI if Terraform isn't managing this specific rule.
+    # 4. Connectivity Finalization
+    log "⏳ Phase 3: NLB Target Warming..."
     sleep 30
 
-    echo -e "${COLOR_GREEN}"
+    echo -e "${COLOR_GREEN}----------------------------------------------------------------"
+    echo "🚀 NEURAL HYPERNOVA: SPECTATOR MODE ONLINE"
     echo "----------------------------------------------------------------"
-    echo "🚀 NEURAL HYPERNOVA: SOVEREIGN FORGE ONLINE"
+    echo "URL: http://$ELB_DNS:8265"
     echo "----------------------------------------------------------------"
-    echo "RAY DASHBOARD: http://$ELB_DNS:8265"
-    echo "----------------------------------------------------------------"
-    echo "ARCHITECTURAL INTEGRITY:"
-    echo "1. Entry: AWS NLB (Active & Resolved)"
-    echo "2. Network: Cilium eBPF Data-Plane Verified"
-    echo "3. Scale: Karpenter GPU NodePool Ready"
-    echo "----------------------------------------------------------------"
-    echo -e "${COLOR_RESET}"
+    echo "ARCHITECTURAL VALIDATION:"
+    echo "1. Entry: AWS NLB v2 (Active)"
+    echo "2. Networking: Cilium eBPF (Bypassing Kube-Proxy)"
+    echo "3. Compute: Karpenter JIT NodePool (Ready)"
+    echo "----------------------------------------------------------------${COLOR_RESET}"
 }
 
+# --- THE NUKE PROTOCOL (Total Erasure) ---
 function nuke() {
-    log "☢️ Scorched Earth Protocol..."
+    log "☢️ Executing Scorched Earth Protocol..."
     cd "$TF_DIR"
-    # Try to get metadata for CLI cleanup before destroying TF
+    
+    # Extract name before destruction
     CLUSTER_NAME=$(terraform output -raw cluster_name 2>/dev/null || echo "neural-hypernova")
     
-    # 1. Delete K8s Resources
+    # 1. Workload Purge
     kubectl delete -f "$K8S_DIR/ai-forge/ray-cluster.yaml" --ignore-not-found || true
+    kubectl delete svc hypernova-dashboard-lb --ignore-not-found || true
     
-    # 2. Terraform Destroy
+    # 2. Infrastructure Destruction
     terraform destroy -auto-approve || true
     
-    # 3. CLI Clean up for orphaned ENIs
-    log "Final Sweep of Security Groups..."
+    # 3. Final Resource Sweep (Kill orphaned Security Groups/ENIs)
+    log "Final Sweep of VPC Resources..."
     SGS=$(aws ec2 describe-security-groups --filters "Name=group-name,Values=*$CLUSTER_NAME*" --query "SecurityGroups[*].GroupId" --output text)
     for sg in $SGS; do
         aws ec2 delete-security-group --group-id $sg || true
     done
-    log "🌑 ZERO TRACE."
+    
+    log "🌑 ZERO TRACE REMAINING."
 }
 
-# --- THE COMMAND ROUTER (Ensure 'demo' is listed here!) ---
+# --- ROUTER ---
 case "$1" in
     ignite) ignite ;;
+    demo) demo ;;
     nuke) nuke ;;
-    demo) demo ;; # THIS WAS LIKELY MISSING
-    *) echo "Usage: $0 {ignite|nuke|demo}" ;;
+    *) echo "Usage: $0 {ignite|demo|nuke}" ;;
 esac

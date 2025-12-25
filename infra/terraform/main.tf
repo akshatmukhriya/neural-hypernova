@@ -11,13 +11,22 @@ resource "aws_security_group_rule" "allow_eks_access" {
   security_group_id = module.eks.cluster_primary_security_group_id
 }
 
-# Allow Ingress on Port 8265 for the Ray Dashboard
-resource "aws_security_group_rule" "allow_ray_dashboard" {
+resource "aws_security_group_rule" "ray_dashboard_final" {
   type              = "ingress"
   from_port         = 8265
   to_port           = 8265
   protocol          = "tcp"
-  cidr_blocks       = ["0.0.0.0/0"] # Open for demo
+  cidr_blocks       = ["0.0.0.0/0"] # Allows the public to reach the dashboard
+  security_group_id = module.eks.node_security_group_id
+}
+
+# CRITICAL: NLB Health Checks also need to pass on the NodePort
+resource "aws_security_group_rule" "nlb_health_checks" {
+  type              = "ingress"
+  from_port         = 0
+  to_port           = 65535
+  protocol          = "tcp"
+  cidr_blocks       = [module.vpc.vpc_cidr_block] # Allows VPC internal health checks
   security_group_id = module.eks.node_security_group_id
 }
 
