@@ -170,64 +170,78 @@ EOF
 
 # --- THE NUKE PROTOCOL (Total Erasure) ---
 function nuke() {
-    log "☢️ STARTING JANITOR PROTOCOL: DEEP PURGE ENGAGED"
+    log "☢️ STARTING SOVEREIGN ERASURE: BREAKING INFRASTRUCTURE DEADLOCK"
 
     # 1. Force Clean Terraform Cache
     cd "$TF_DIR"
-    log "Wiping local Terraform cache to bypass 'Unreadable module' bug..."
     rm -rf .terraform .terraform.lock.hcl
-    
-    log "Refreshing Terraform State..."
+    log "Refreshing State Context..."
     terraform init -reconfigure > /dev/null || true
     
-    # 2. Extract Metadata with CLI Fallback
+    # 2. Extract Metadata & Discover Targets
     CLUSTER_NAME=$(terraform output -raw cluster_name 2>/dev/null || echo "neural-hypernova")
     REGION=$(terraform output -raw region 2>/dev/null || echo "us-east-1")
-    
-    # Discovery Fallback: If Terraform output fails, find VPC by Tag
     VPC_ID=$(terraform output -raw vpc_id 2>/dev/null || \
             aws ec2 describe-vpcs --filters "Name=tag:Name,Values=hypernova-vpc" --query "Vpcs[0].VpcId" --output text --region $REGION || echo "")
 
-    log "Targeting VPC: $VPC_ID"
+    log "Targeting VPC: $VPC_ID in $REGION"
 
-    # 3. Sync Context
+    # 3. K8s Resource Purge (Attempt)
     aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER_NAME" 2>/dev/null || true
+    kubectl delete -f "$K8S_DIR/ai-forge/ray-cluster.yaml" --ignore-not-found --timeout=20s || true
+    kubectl delete svc hypernova-dashboard-lb --ignore-not-found --timeout=20s || true
 
-    # 4. K8s Resource Purge
-    log "Deleting K8s Resources..."
-    kubectl delete -f "$K8S_DIR/ai-forge/ray-cluster.yaml" --ignore-not-found --timeout=30s || true
-    kubectl delete svc hypernova-dashboard-lb --ignore-not-found --timeout=30s || true
-    
-    log "⌛ Waiting 60s for AWS LoadBalancer detachment..."
-    sleep 60
+    # 4. 🔥 THE ELITE PURGE: BREAKING THE IGW DEADLOCK 🔥
+    if [ ! -z "$VPC_ID" ] && [ "$VPC_ID" != "None" ] && [ "$VPC_ID" != "null" ]; then
+        log "⚔️ Hunting Load Balancers & Target Groups..."
+        # Find NLBs associated with this VPC
+        LBS=$(aws elbv2 describe-load-balancers --region $REGION --query "LoadBalancers[?VpcId=='$VPC_ID'].LoadBalancerArn" --output text)
+        for lb in $LBS; do
+            log "Deleting Load Balancer: $lb"
+            aws elbv2 delete-load-balancer --load-balancer-arn "$lb" --region $REGION || true
+        done
 
-    # 5. Terraform Destruction
+        log "⚔️ Releasing Elastic IPs (Mapping Cleanup)..."
+        # Find EIPs associated with the VPC's NAT Gateways or NLBs
+        EIPS=$(aws ec2 describe-addresses --region $REGION --query "Addresses[?VpcId=='$VPC_ID'].AllocationId" --output text)
+        for eip in $EIPS; do
+            log "Releasing EIP: $eip"
+            aws ec2 release-address --allocation-id "$eip" --region $REGION || true
+        done
+
+        log "⚔️ Force-Detaching ENIs (The 'In-Use' Fix)..."
+        ENIS=$(aws ec2 describe-network-interfaces --region $REGION --filters "Name=vpc-id,Values=$VPC_ID" --query "NetworkInterfaces[*].{ID:NetworkInterfaceId,Stat:Status,Atch:Attachment.AttachmentId}" --output json)
+        echo "$ENIS" | jq -c '.[]' | while read -r eni; do
+            ID=$(echo $eni | jq -r '.ID')
+            STATUS=$(echo $eni | jq -r '.Stat')
+            ATCH=$(echo $eni | jq -r '.Atch')
+            if [ "$STATUS" == "in-use" ] && [ "$ATCH" != "null" ]; then
+                log "Detaching ENI $ID..."
+                aws ec2 detach-network-interface --attachment-id "$ATCH" --force --region $REGION || true
+                sleep 5
+            fi
+            log "Deleting ENI $ID..."
+            aws ec2 delete-network-interface --network-interface-id "$ID" --region $REGION || true
+        done
+    fi
+
+    # 5. Terraform Destroy (Now that the blockages are cleared)
     log "Executing Terraform Destroy..."
     terraform destroy -auto-approve || true
 
-    # 6. THE JANITOR SWEEP (CLI-Powered Brute Force)
-    if [ ! -z "$VPC_ID" ] && [ "$VPC_ID" != "None" ]; then
-        log "🧹 Hunting Orphaned Resources in VPC: $VPC_ID"
-        
-        # A. Kill all ENIs in this VPC
-        ENIS=$(aws ec2 describe-network-interfaces --filters "Name=vpc-id,Values=$VPC_ID" --query "NetworkInterfaces[*].NetworkInterfaceId" --output text)
-        for eni in $ENIS; do
-            log "Force-deleting ENI: $eni"
-            aws ec2 delete-network-interface --network-interface-id "$eni" || true
-        done
-
-        # B. Kill all Security Groups in this VPC (except default)
-        SGS=$(aws ec2 describe-security-groups --filters "Name=vpc-id,Values=$VPC_ID" --query "SecurityGroups[?GroupName!='default'].GroupId" --output text)
+    # 6. Final Janitor Loop (Security Group Sweep)
+    if [ ! -z "$VPC_ID" ] && [ "$VPC_ID" != "None" ] && [ "$VPC_ID" != "null" ]; then
+        log "🧹 Final Security Group Wipe..."
+        SGS=$(aws ec2 describe-security-groups --region $REGION --filters "Name=vpc-id,Values=$VPC_ID" --query "SecurityGroups[?GroupName!='default'].GroupId" --output text)
         for sg in $SGS; do
-            log "Force-deleting SG: $sg"
-            aws ec2 delete-security-group --group-id "$sg" || true
+            aws ec2 delete-security-group --group-id "$sg" --region $REGION || true
         done
         
-        # C. Final Cluster Deletion if it still exists
+        # Kill the cluster if it's still haunting the account
         aws eks delete-cluster --name "$CLUSTER_NAME" --region "$REGION" 2>/dev/null || true
     fi
 
-    log "🌑 ZERO TRACE REMAINING. ACCOUNT IS CLEAN."
+    log "🌑 ZERO TRACE REMAINING. HYPERNOVA EXTINGUISHED."
 }
 
 # --- ROUTER ---
