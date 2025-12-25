@@ -1,142 +1,102 @@
 #!/bin/bash
 set -e
 
-# --- ARCHITECTURAL ANCHORS ---
+# --- CONFIG ---
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 TF_DIR="$ROOT_DIR/infra/terraform"
 K8S_DIR="$ROOT_DIR/k8s"
-
-# --- ELITE VISUALS ---
 COLOR_CYAN='\033[0;36m'
 COLOR_GREEN='\033[0;32m'
-COLOR_RED='\033[0;31m'
 COLOR_RESET='\033[0m'
 
-function log() { echo -e "${COLOR_CYAN}[HYPERNOVA-LOG] $(date +'%H:%M:%S') | $1${COLOR_RESET}"; }
-function error_log() { echo -e "${COLOR_RED}[HYPERNOVA-ERROR] $1${COLOR_RESET}"; }
+function log() { echo -e "${COLOR_CYAN}[HYPERNOVA] $1${COLOR_RESET}"; }
 
-
-# --- THE BOOTSTRAP ENGINE ---
-function bootstrap_foundation() {
-    log "📡 Detecting AWS Environment..."
+# --- THE BOOTSTRAP (The Long-Run Fix) ---
+function bootstrap() {
+    log "📡 Detecting Cloud Context..."
     ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-    BUCKET_NAME="hypernova-state-$ACCOUNT_ID" # Globally unique bucket name
+    BUCKET="hypernova-state-$ACCOUNT_ID"
     REGION="us-east-1"
 
-    log "🔭 Verifying State Persistence: $BUCKET_NAME"
-    if ! aws s3 ls "s3://$BUCKET_NAME" > /dev/null 2>&1; then
-        log "🏗️ Foundation not found. Creating S3 Sovereign State Bucket..."
-        aws s3 mb "s3://$BUCKET_NAME" --region $REGION
-        aws s3api put-bucket-versioning --bucket "$BUCKET_NAME" --versioning-configuration Status=Enabled
+    if ! aws s3 ls "s3://$BUCKET" > /dev/null 2>&1; then
+        log "🏗️ Creating State Foundation: $BUCKET"
+        aws s3 mb "s3://$BUCKET" --region $REGION
+        aws s3api put-bucket-versioning --bucket "$BUCKET" --versioning-configuration Status=Enabled
     fi
-
-    # THE MAGIC: Dynamically pass the bucket name to Terraform
-    # This overrides whatever is in backend.tf
-    export TF_CLI_ARGS_init="-backend-config=\"bucket=$BUCKET_NAME\""
-    log "✅ Foundation Ready. State locked to $BUCKET_NAME"
+    INIT_ARGS="-backend-config=\"bucket=$BUCKET\""
 }
 
-
-# --- THE IGNITE PROTOCOL (Zero to Sovereign) ---
+# --- THE IGNITE ---
 function ignite() {
+    bootstrap
+    log "🚀 Igniting Forge..."
     cd "$TF_DIR"
-    # THE RUTHLESS KILL: Remove the ghost file if it exists in the repo
-    [ -f "backend.tf" ] && rm -f "backend.tf" && log "🔥 Redundant backend.tf purged."
-    
-    bootstrap_foundation
-    
-    log "Initializing Terraform with Persistent State..."
-    # We pass the dynamic bucket name directly into the init command
+    [ -f "backend.tf" ] && rm -f "backend.tf" # Kill the ghost
     terraform init $INIT_ARGS -reconfigure
     terraform apply -auto-approve
 
-    # 2. Metadata Extraction
-    CLUSTER_NAME=$(terraform output -raw cluster_name)
-    REGION=$(terraform output -raw region)
-    VPC_ID=$(aws eks describe-cluster --name "$CLUSTER_NAME" --query "cluster.resourcesVpcConfig.vpcId" --output text)
-    log "Cluster DNA Extracted: $CLUSTER_NAME in $REGION (VPC: $VPC_ID)"
+    NAME=$(terraform output -raw cluster_name)
+    aws eks update-kubeconfig --region us-east-1 --name "$NAME"
 
-    # 3. Kubeconfig Synchronization
-    aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER_NAME"
-
-    # 4. Helm Repository Registry
-    log "Registering High-Scale Repositories..."
+    log "🛠️ Injecting Operational Layers..."
     helm repo add cilium https://helm.cilium.io/
-    helm repo add kuberay https://ray-project.github.io/kuberay-helm/
     helm repo add eks https://aws.github.io/eks-charts
-    helm repo add nvdp https://nvidia.github.io/k8s-device-plugin
     helm repo update
 
-    # 5. Data Plane Injection (Cilium eBPF)
-    log "Injecting Cilium 1.16.5 (Kernel-Level Networking)..."
-    helm upgrade --install cilium cilium/cilium --version 1.16.5 \
-      --namespace kube-system \
-      --set kubeProxyReplacement=true \
-      --set debug.enabled=false \
-      --set debug.verbose="null" \
-      --wait || true
+    log "Injecting Cilium eBPF..."
+    helm upgrade --install cilium cilium/cilium --version 1.16.5 -n kube-system --set kubeProxyReplacement=true --wait
 
-    # 6. AWS Load Balancer Controller (The Connectivity Bridge)
-    log "Deploying AWS Load Balancer Controller with IRSA..."
-    ROLE_ARN=$(cd "$TF_DIR" && terraform output -raw lb_controller_role_arn)
+    log "Injecting AWS Load Balancer Controller..."
+    ROLE_ARN=$(terraform output -raw lb_role_arn)
+    VPC_ID=$(terraform output -raw vpc_id)
+    kubectl apply -k "github.com/aws/eks-charts/stable/aws-load-balancer-controller/crds?ref=master"
+    helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system \
+      --set clusterName="$NAME" --set serviceAccount.create=true \
+      --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="$ROLE_ARN" \
+      --set region=us-east-1 --set vpcId="$VPC_ID" --wait
 
-    # Create the ServiceAccount manually to ensure the annotation is perfect
-    kubectl create serviceaccount aws-load-balancer-controller -n kube-system --dry-run=client -o yaml | \
-    kubectl patch --local=true -f - -p "{\"metadata\":{\"annotations\":{\"eks.amazonaws.com/role-arn\":\"$ROLE_ARN\"}}}" --dry-run=client -o yaml | \
-    kubectl apply -f -
-
-    # Install the Controller, telling it to use the existing ServiceAccount
-    helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
-      --namespace kube-system \
-      --set clusterName="$CLUSTER_NAME" \
-      --set serviceAccount.create=false \
-      --set serviceAccount.name=aws-load-balancer-controller \
-      --set region="$REGION" \
-      --set vpcId="$VPC_ID" \
-      --wait
-
-    # 7. Karpenter (Just-In-Time GPU Scaling)
-    log "Injecting Karpenter v1.1.1..."
-    helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter \
-      --version 1.1.1 \
-      --namespace karpenter --create-namespace \
-      --set settings.clusterName="$CLUSTER_NAME" \
-      --wait
+    log "Injecting Karpenter & Ray..."
+    helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter --version 1.1.1 -n karpenter --create-namespace --set settings.clusterName="$NAME" --wait
+    helm upgrade --install kuberay-operator ray-project/kuberay-operator --version 1.2.2
     
-    kubectl wait --for=condition=Available --timeout=60s deployment/karpenter -n karpenter
-
-    # 8. AI Forge Core (KubeRay + NVIDIA)
-    log "Deploying AI Orchestration (KubeRay & NVIDIA Plugin)..."
-    helm upgrade --install kuberay-operator kuberay/kuberay-operator --version 1.2.2
-    helm upgrade --install nvidia-device-plugin nvdp/nvidia-device-plugin \
-      --namespace kube-system \
-      --set gfd.enabled=true \
-      --wait
-
-    # 9. Workload Activation
-    log "Applying Neural Hypernova Manifests..."
     kubectl apply -f "$K8S_DIR/core/karpenter-gpu-pool.yaml"
     kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"
-
-    log "✅ NEURAL HYPERNOVA IS ARMED AND OPERATIONAL."
+    log "✅ FORGE ONLINE."
 }
 
-# --- THE DEMO PROTOCOL (Public Visibility) ---
-function demo() {
-    log "🔍 Discovering Hypernova Context..."
-    
+# --- THE NUKE (Scorched Earth) ---
+function nuke() {
+    bootstrap
+    log "☢️ STARTING SOVEREIGN ERASURE..."
     cd "$TF_DIR"
+    [ -f "backend.tf" ] && rm -f "backend.tf"
+    terraform init $INIT_ARGS -reconfigure || true
+    
+    VPC_ID=$(terraform output -raw vpc_id 2>/dev/null || aws ec2 describe-vpcs --filters "Name=tag:Name,Values=hypernova-vpc" --query "Vpcs[0].VpcId" --output text || echo "")
 
-    # Kill the redundant backend file if it exists to prevent HCL conflict
-    [ -f "backend.tf" ] && rm -f "backend.tf" && log "🔥 Ghost backend.tf purged."
+    log "⚔️ Clearing K8s LBs & Detaching Infrastructure..."
+    kubectl delete svc hypernova-dashboard-lb --ignore-not-found --timeout=30s || true
+    
+    # Critical: Kill ENIs that block VPC deletion
+    if [ ! -z "$VPC_ID" ] && [ "$VPC_ID" != "None" ]; then
+        log "Hunting ENIs in VPC $VPC_ID..."
+        ENIS=$(aws ec2 describe-network-interfaces --filters "Name=vpc-id,Values=$VPC_ID" --query "NetworkInterfaces[*].NetworkInterfaceId" --output text)
+        for eni in $ENIS; do aws ec2 delete-network-interface --network-interface-id $eni || true; done
+    fi
 
-    terraform init -reconfigure > /dev/null
-    CLUSTER_NAME=$(terraform output -raw cluster_name 2>/dev/null || echo "neural-hypernova")
-    REGION=$(terraform output -raw region 2>/dev/null || echo "us-east-1")
-    aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER_NAME"
+    terraform destroy -auto-approve || true
+    log "🌑 ZERO TRACE."
+}
 
-    # 1. Create Public Proxy (Avoiding Headless Service Collision)
-    log "🌐 Provisioning Industrial NLB via AWS LBC..."
+# --- THE DEMO ---
+function demo() {
+    bootstrap
+    log "🎭 Launching Spectator..."
+    cd "$TF_DIR"
+    terraform init $INIT_ARGS -reconfigure > /dev/null
+    NAME=$(terraform output -raw cluster_name)
+    aws eks update-kubeconfig --region us-east-1 --name "$NAME"
+
     kubectl apply -f - <<EOF
 apiVersion: v1
 kind: Service
@@ -148,133 +108,21 @@ metadata:
     service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
 spec:
   type: LoadBalancer
-  selector:
-    ray.io/node-type: head
-  ports:
-  - name: dashboard
-    protocol: TCP
-    port: 8265
-    targetPort: 8265
+  selector: { ray.io/node-type: head }
+  ports: [{ name: dash, port: 8265, targetPort: 8265 }]
 EOF
 
-    # 3. Phase 1: DNS Assignment with Diagnostic Timeout
-    log "⏳ Phase 1: Waiting for DNS Assignment (60s Timeout)..."
-    local ELB_DNS=""
-    local COUNTER=0
-    while [ -z "$ELB_DNS" ] && [ $COUNTER -lt 6 ]; do
-        ELB_DNS=$(kubectl get svc hypernova-dashboard-lb -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
-        if [ -z "$ELB_DNS" ]; then
-            log "Still waiting for DNS... ($((COUNTER*10))s)"
-            sleep 10
-            COUNTER=$((COUNTER+1))
-        fi
+    log "Waiting for DNS..."
+    URL=""
+    while [ -z "$URL" ]; do
+        URL=$(kubectl get svc hypernova-dashboard-lb -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+        sleep 10
     done
-
-    if [ -z "$ELB_DNS" ]; then
-        error_log "❌ DNS Assignment Timed Out. Checking Controller Health..."
-        echo "--- AWS LOAD BALANCER CONTROLLER LOGS ---"
-        kubectl logs -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --tail=20
-        echo "--- SERVICE EVENTS ---"
-        kubectl describe svc hypernova-dashboard-lb
-        exit 1
-    fi
-
-    # 3. Global DNS Resolution Guard
-    log "⏳ Phase 2: Waiting for Global DNS Propagation (NXDOMAIN Guard)..."
-    local RESOLVED="false"
-    local ATTEMPTS=0
-    while [ "$RESOLVED" != "true" ] && [ $ATTEMPTS -lt 20 ]; do
-        if nslookup "$ELB_DNS" > /dev/null 2>&1; then
-            RESOLVED="true"
-            log "✅ DNS Resolution Verified."
-        else
-            log "Still propagating... ($((ATTEMPTS*15))s)"
-            sleep 15
-            ATTEMPTS=$((ATTEMPTS+1))
-        fi
-    done
-
-    # 4. Connectivity Finalization
-    log "⏳ Phase 3: NLB Target Warming..."
-    sleep 30
-
-    echo -e "${COLOR_GREEN}----------------------------------------------------------------"
-    echo "🚀 NEURAL HYPERNOVA: SPECTATOR MODE ONLINE"
-    echo "----------------------------------------------------------------"
-    echo "URL: http://$ELB_DNS:8265"
-    echo "----------------------------------------------------------------"
-    echo "ARCHITECTURAL VALIDATION:"
-    echo "1. Entry: AWS NLB v2 (Active)"
-    echo "2. Networking: Cilium eBPF (Bypassing Kube-Proxy)"
-    echo "3. Compute: Karpenter JIT NodePool (Ready)"
-    echo "----------------------------------------------------------------${COLOR_RESET}"
+    log "🚀 DASHBOARD: http://$URL:8265"
 }
 
-# --- THE NUKE PROTOCOL (Total Erasure) ---
-function nuke() {
-    cd "$TF_DIR"
-    # THE RUTHLESS KILL: Remove the ghost file
-    [ -f "backend.tf" ] && rm -f "backend.tf" && log "🔥 Redundant backend.tf purged."
-    
-    bootstrap_foundation
-    
-    log "Refreshing State Context..."
-    terraform init $INIT_ARGS -reconfigure || true
-
-# 2. Extract Metadata with CLI Fallback
-CLUSTER_NAME=$(terraform output -raw cluster_name 2>/dev/null || echo "neural-hypernova")
-REGION=$(terraform output -raw region 2>/dev/null || echo "us-east-1")
-
-# Discovery Fallback: If Terraform output fails, find VPC by Tag
-VPC_ID=$(terraform output -raw vpc_id 2>/dev/null || \
-        aws ec2 describe-vpcs --filters "Name=tag:Name,Values=hypernova-vpc" --query "Vpcs[0].VpcId" --output text --region $REGION || echo "")
-
-log "Targeting VPC: $VPC_ID"
-
-# 3. Sync Context
-aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER_NAME" 2>/dev/null || true
-
-# 4. K8s Resource Purge
-log "Deleting K8s Resources..."
-kubectl delete -f "$K8S_DIR/ai-forge/ray-cluster.yaml" --ignore-not-found --timeout=30s || true
-kubectl delete svc hypernova-dashboard-lb --ignore-not-found --timeout=30s || true
-
-log "⌛ Waiting 60s for AWS LoadBalancer detachment..."
-sleep 60
-
-# 5. Terraform Destruction
-log "Executing Terraform Destroy..."
-terraform destroy -auto-approve || true
-
-# 6. THE JANITOR SWEEP (CLI-Powered Brute Force)
-if [ ! -z "$VPC_ID" ] && [ "$VPC_ID" != "None" ]; then
-    log "🧹 Hunting Orphaned Resources in VPC: $VPC_ID"
-    
-    # A. Kill all ENIs in this VPC
-    ENIS=$(aws ec2 describe-network-interfaces --filters "Name=vpc-id,Values=$VPC_ID" --query "NetworkInterfaces[*].NetworkInterfaceId" --output text)
-    for eni in $ENIS; do
-        log "Force-deleting ENI: $eni"
-        aws ec2 delete-network-interface --network-interface-id "$eni" || true
-    done
-
-    # B. Kill all Security Groups in this VPC (except default)
-    SGS=$(aws ec2 describe-security-groups --filters "Name=vpc-id,Values=$VPC_ID" --query "SecurityGroups[?GroupName!='default'].GroupId" --output text)
-    for sg in $SGS; do
-        log "Force-deleting SG: $sg"
-        aws ec2 delete-security-group --group-id "$sg" || true
-    done
-    
-    # C. Final Cluster Deletion if it still exists
-    aws eks delete-cluster --name "$CLUSTER_NAME" --region "$REGION" 2>/dev/null || true
-fi
-
-log "🌑 ZERO TRACE REMAINING. ACCOUNT IS CLEAN."
-}
-
-# --- ROUTER ---
 case "$1" in
     ignite) ignite ;;
-    demo) demo ;;
     nuke) nuke ;;
-    *) echo "Usage: $0 {ignite|demo|nuke}" ;;
+    demo) demo ;;
 esac
