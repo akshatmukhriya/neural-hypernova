@@ -11,6 +11,15 @@ resource "aws_security_group_rule" "allow_eks_access" {
   security_group_id = module.eks.cluster_primary_security_group_id
 }
 
+# Allow Ingress on Port 8265 for the Ray Dashboard
+resource "aws_security_group_rule" "allow_ray_dashboard" {
+  type              = "ingress"
+  from_port         = 8265
+  to_port           = 8265
+  protocol          = "tcp"
+  cidr_blocks       = ["0.0.0.0/0"] # Open for demo
+  security_group_id = module.eks.node_security_group_id
+}
 
 module "vpc" {
   source  = "terraform-aws-modules/vpc/aws"
