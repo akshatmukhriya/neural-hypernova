@@ -1,13 +1,15 @@
 #!/bin/bash
 set -e
 
-# --- PATHS ---
+# --- ANCHOR PATHS ---
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 TF_DIR="$ROOT_DIR/infra/terraform"
 K8S_DIR="$ROOT_DIR/k8s"
 
 COLOR_CYAN='\033[0;36m'
+COLOR_GREEN='\033[0;32m'
 COLOR_RESET='\033[0m'
+
 function log() { echo -e "${COLOR_CYAN}[HYPERNOVA-LOG] $1${COLOR_RESET}"; }
 
 function ignite() {
@@ -64,33 +66,54 @@ function ignite() {
 }
 
 function demo() {
-    log "🎭 Triggering Distributed GPU Workload..."
-    kubectl apply -f k8s/ai-forge/stress-test.yaml
+    log "🔍 Discovering Hypernova Infrastructure..."
+    
+    # 1. Self-Discovery (Crucial for GitHub Actions context)
+    cd "$TF_DIR"
+    terraform init -reconfigure > /dev/null
+    CLUSTER_NAME=$(terraform output -raw cluster_name 2>/dev/null || echo "neural-hypernova")
+    REGION=$(terraform output -raw region 2>/dev/null || echo "us-east-1")
+    
+    log "Syncing Kubeconfig for $CLUSTER_NAME..."
+    aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER_NAME"
 
-    log "🌐 Exposing Ray Dashboard via High-Performance NLB..."
-    # We patch the Ray Head service to be a LoadBalancer
+    # 2. Trigger Workload
+    log "🎭 Injecting Distributed GPU Workload..."
+    kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml" # Ensure base cluster is up
+    
+    # 3. Expose Dashboard
+    log "🌐 Provisioning Public Access to Ray Dashboard..."
+    # We target the service created by the Ray Operator
     kubectl patch svc raycluster-hypernova-ray-head-svc -p '{"spec": {"type": "LoadBalancer"}}'
 
-    log "⏳ Waiting for NLB to provision (this takes ~2 mins)..."
-    # Wait for the external IP to be assigned
+    # 4. Wait & Report
+    log "⏳ Waiting for NLB Propagation (Observation Mode)..."
     local ELB_DNS=""
-    while [ -z "$ELB_DNS" ]; do
-        ELB_DNS=$(kubectl get svc raycluster-hypernova-ray-head-svc -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
-        [ -z "$ELB_DNS" ] && sleep 10
+    # Timeout after 2 minutes if NLB doesn't show up
+    for i in {1..12}; do
+        ELB_DNS=$(kubectl get svc raycluster-hypernova-ray-head-svc -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+        if [ ! -z "$ELB_DNS" ]; then
+            break
+        fi
+        log "Still waiting for LoadBalancer DNS... ($((i*10))s)"
+        sleep 10
     done
 
-    echo -e "${COLOR_GREEN}"
-    echo "----------------------------------------------------------------"
-    echo "🚀 NEURAL HYPERNOVA SPECTATOR MODE IS ACTIVE"
-    echo "----------------------------------------------------------------"
-    echo "RAY DASHBOARD URL: http://$ELB_DNS:8265"
-    echo "----------------------------------------------------------------"
-    echo "STATS TO SHOWCASE:"
-    echo "1. SCALE: Run 'kubectl get nodes' to see the GPU nodes Karpenter spawned."
-    echo "2. NETWORKING: Cilium eBPF is handling all inter-pod traffic at 100Gbps."
-    echo "3. EFFICIENCY: This cluster costs \$0.00 when the RayJob finishes."
-    echo "----------------------------------------------------------------"
-    echo -e "${COLOR_RESET}"
+    if [ -z "$ELB_DNS" ]; then
+        log "⚠️ NLB taking longer than expected. Check AWS Console for the DNS name."
+    else
+        echo -e "${COLOR_GREEN}"
+        echo "----------------------------------------------------------------"
+        echo "🚀 NEURAL HYPERNOVA IS LIVE"
+        echo "----------------------------------------------------------------"
+        echo "ACCESS UI: http://$ELB_DNS:8265"
+        echo "----------------------------------------------------------------"
+        echo "OBSERVATION COMMANDS:"
+        echo "1. Watch Nodes:  kubectl get nodes -l karpenter.sh/nodepool=gpu-forge"
+        echo "2. Watch Pods:   kubectl get pods -n default"
+        echo "----------------------------------------------------------------"
+        echo -e "${COLOR_RESET}"
+    fi
 }
 
 function nuke() {
@@ -114,7 +137,10 @@ function nuke() {
     log "🌑 ZERO TRACE."
 }
 
+# --- THE COMMAND ROUTER (Ensure 'demo' is listed here!) ---
 case "$1" in
     ignite) ignite ;;
     nuke) nuke ;;
+    demo) demo ;; # THIS WAS LIKELY MISSING
+    *) echo "Usage: $0 {ignite|nuke|demo}" ;;
 esac
