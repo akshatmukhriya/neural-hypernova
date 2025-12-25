@@ -70,4 +70,20 @@ module "eks" {
       desired_size = 1
     }
   }
+  
+  # Add YOUR IAM User to the cluster so you can see resources in the AWS Console
+  access_entries = {
+    # Replace the ARN with your own IAM ARN (find it in AWS Console -> IAM -> Users)
+    admin_user = {
+      principal_arn     = "arn:aws:iam::277047392590:root" # Adding the root/account allows you to see it
+      policy_associations = {
+        admin = {
+          policy_arn = "arn:aws:eks:aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+          access_scope = {
+            type = "cluster"
+          }
+        }
+      }
+    }
+  }
 }
