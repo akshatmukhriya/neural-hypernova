@@ -28,18 +28,19 @@ module "eks" {
 
   cluster_name    = "neural-hypernova"
   cluster_version = "1.29"
+  
+  # --- THE FIXES ---
+  create_cloudwatch_log_group = false # Script will handle or we just don't need it for demo
+  create_kms_key              = false # Use default AWS encryption to save costs/collisions
+  cluster_encryption_config   = {}    # Disable custom KMS for the demo to avoid alias conflicts
+  # -----------------
+
   vpc_id          = module.vpc.vpc_id
   subnet_ids      = module.vpc.private_subnets
-
-  # Access Entry for your local machine
+  
   enable_cluster_creator_admin_permissions = true
-
-  # OIDC for Secret Management & Karpenter
   enable_irsa = true
 
-  # The "Invisible" Logic: No managed node groups. 
-  # We start with 1 tiny node for the "Brain" (Core Services)
-  # Everything else is Karpenter.
   eks_managed_node_groups = {
     brain = {
       instance_types = ["t3.medium"]
