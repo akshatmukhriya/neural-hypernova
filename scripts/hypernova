@@ -172,50 +172,59 @@ EOF
 function nuke() {
     log "☢️ STARTING JANITOR PROTOCOL: DEEP PURGE ENGAGED"
 
-    # 1. Recover Metadata via S3 State
+    # 1. Force Clean Terraform Cache
     cd "$TF_DIR"
-    log "Refreshing Terraform State..."
-    # -upgrade fixes the "Unreadable module directory" error by re-downloading modules
-    terraform init -reconfigure -upgrade > /dev/null || true
+    log "Wiping local Terraform cache to bypass 'Unreadable module' bug..."
+    rm -rf .terraform .terraform.lock.hcl
     
+    log "Refreshing Terraform State..."
+    terraform init -reconfigure > /dev/null || true
+    
+    # 2. Extract Metadata with CLI Fallback
     CLUSTER_NAME=$(terraform output -raw cluster_name 2>/dev/null || echo "neural-hypernova")
     REGION=$(terraform output -raw region 2>/dev/null || echo "us-east-1")
-    VPC_ID=$(terraform output -raw vpc_id 2>/dev/null || echo "")
+    
+    # Discovery Fallback: If Terraform output fails, find VPC by Tag
+    VPC_ID=$(terraform output -raw vpc_id 2>/dev/null || \
+            aws ec2 describe-vpcs --filters "Name=tag:Name,Values=hypernova-vpc" --query "Vpcs[0].VpcId" --output text --region $REGION || echo "")
 
-    # 2. Sync Context
+    log "Targeting VPC: $VPC_ID"
+
+    # 3. Sync Context
     aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER_NAME" 2>/dev/null || true
 
-    # 3. K8s Resource Purge (Triggering AWS cleanup)
+    # 4. K8s Resource Purge
     log "Deleting K8s Resources..."
     kubectl delete -f "$K8S_DIR/ai-forge/ray-cluster.yaml" --ignore-not-found --timeout=30s || true
     kubectl delete svc hypernova-dashboard-lb --ignore-not-found --timeout=30s || true
     
-    # CRITICAL: Wait for AWS to notice the LoadBalancer is gone
     log "⌛ Waiting 60s for AWS LoadBalancer detachment..."
     sleep 60
 
-    # 4. Terraform Destruction
+    # 5. Terraform Destruction
     log "Executing Terraform Destroy..."
     terraform destroy -auto-approve || true
 
-    # 5. THE JANITOR SWEEP (The Brute Force)
-    # If Terraform failed, we manually kill the ENIs and SGs using the VPC ID
-    if [ ! -z "$VPC_ID" ]; then
+    # 6. THE JANITOR SWEEP (CLI-Powered Brute Force)
+    if [ ! -z "$VPC_ID" ] && [ "$VPC_ID" != "None" ]; then
         log "🧹 Hunting Orphaned Resources in VPC: $VPC_ID"
         
-        # Kill all available ENIs in this VPC
+        # A. Kill all ENIs in this VPC
         ENIS=$(aws ec2 describe-network-interfaces --filters "Name=vpc-id,Values=$VPC_ID" --query "NetworkInterfaces[*].NetworkInterfaceId" --output text)
         for eni in $ENIS; do
             log "Force-deleting ENI: $eni"
             aws ec2 delete-network-interface --network-interface-id "$eni" || true
         done
 
-        # Kill all Security Groups in this VPC (except default)
+        # B. Kill all Security Groups in this VPC (except default)
         SGS=$(aws ec2 describe-security-groups --filters "Name=vpc-id,Values=$VPC_ID" --query "SecurityGroups[?GroupName!='default'].GroupId" --output text)
         for sg in $SGS; do
             log "Force-deleting SG: $sg"
             aws ec2 delete-security-group --group-id "$sg" || true
         done
+        
+        # C. Final Cluster Deletion if it still exists
+        aws eks delete-cluster --name "$CLUSTER_NAME" --region "$REGION" 2>/dev/null || true
     fi
 
     log "🌑 ZERO TRACE REMAINING. ACCOUNT IS CLEAN."
