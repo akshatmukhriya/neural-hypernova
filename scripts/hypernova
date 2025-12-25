@@ -15,18 +15,39 @@ COLOR_RESET='\033[0m'
 function log() { echo -e "${COLOR_CYAN}[HYPERNOVA-LOG] $(date +'%H:%M:%S') | $1${COLOR_RESET}"; }
 function error_log() { echo -e "${COLOR_RED}[HYPERNOVA-ERROR] $1${COLOR_RESET}"; }
 
+
+# --- THE BOOTSTRAP ENGINE ---
+function bootstrap_foundation() {
+    log "📡 Detecting AWS Environment..."
+    ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+    BUCKET_NAME="hypernova-state-$ACCOUNT_ID" # Globally unique bucket name
+    REGION="us-east-1"
+
+    log "🔭 Verifying State Persistence: $BUCKET_NAME"
+    if ! aws s3 ls "s3://$BUCKET_NAME" > /dev/null 2>&1; then
+        log "🏗️ Foundation not found. Creating S3 Sovereign State Bucket..."
+        aws s3 mb "s3://$BUCKET_NAME" --region $REGION
+        aws s3api put-bucket-versioning --bucket "$BUCKET_NAME" --versioning-configuration Status=Enabled
+    fi
+
+    # THE MAGIC: Dynamically pass the bucket name to Terraform
+    # This overrides whatever is in backend.tf
+    export TF_CLI_ARGS_init="-backend-config=\"bucket=$BUCKET_NAME\""
+    log "✅ Foundation Ready. State locked to $BUCKET_NAME"
+}
+
+
 # --- THE IGNITE PROTOCOL (Zero to Sovereign) ---
 function ignite() {
-    log "🚀 Ignite Sequence: Neural Hypernova V1.1.2 (Industrial Release)"
+    bootstrap_foundation
+    log "🚀 Ignite Sequence: Neural Hypernova V1.2.0"
 
-    # 1. Infrastructure Synthesis (Terraform)
     cd "$TF_DIR"
+    # Ensure no local state corruption
+    rm -rf .terraform .terraform.lock.hcl 
     
-    # Kill the redundant backend file if it exists to prevent HCL conflict
-    [ -f "backend.tf" ] && rm -f "backend.tf" && log "🔥 Ghost backend.tf purged."
-
-    log "Synthesizing Infrastructure in $TF_DIR..."
-    terraform init -reconfigure
+    log "Initializing Terraform..."
+    terraform init $TF_CLI_ARGS_init -reconfigure
     terraform apply -auto-approve
 
     # 2. Metadata Extraction
@@ -191,13 +212,12 @@ EOF
 
 # --- THE NUKE PROTOCOL (Total Erasure) ---
 function nuke() {
-    log "☢️ STARTING SOVEREIGN ERASURE: BREAKING INFRASTRUCTURE DEADLOCK"
+    bootstrap_foundation
+    log "☢️ STARTING SOVEREIGN ERASURE..."
 
-    # 1. Force Clean Terraform Cache
     cd "$TF_DIR"
     rm -rf .terraform .terraform.lock.hcl
-    log "Refreshing State Context..."
-    terraform init -reconfigure > /dev/null || true
+    terraform init $TF_CLI_ARGS_init -reconfigure || true
     
     # 2. Extract Metadata & Discover Targets
     CLUSTER_NAME=$(terraform output -raw cluster_name 2>/dev/null || echo "neural-hypernova")
