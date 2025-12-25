@@ -21,6 +21,10 @@ function ignite() {
 
     # 1. Infrastructure Synthesis (Terraform)
     cd "$TF_DIR"
+    
+    # Kill the redundant backend file if it exists to prevent HCL conflict
+    [ -f "backend.tf" ] && rm -f "backend.tf" && log "🔥 Ghost backend.tf purged."
+
     log "Synthesizing Infrastructure in $TF_DIR..."
     terraform init -reconfigure
     terraform apply -auto-approve
@@ -101,6 +105,10 @@ function demo() {
     log "🔍 Discovering Hypernova Context..."
     
     cd "$TF_DIR"
+
+    # Kill the redundant backend file if it exists to prevent HCL conflict
+    [ -f "backend.tf" ] && rm -f "backend.tf" && log "🔥 Ghost backend.tf purged."
+
     terraform init -reconfigure > /dev/null
     CLUSTER_NAME=$(terraform output -raw cluster_name 2>/dev/null || echo "neural-hypernova")
     REGION=$(terraform output -raw region 2>/dev/null || echo "us-east-1")
