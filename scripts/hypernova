@@ -89,26 +89,37 @@ function ignite() {
 
 # --- THE SCORCHED EARTH PROTOCOL ---
 function nuke() {
-    log "SCORCHED EARTH PROTOCOL ENGAGED. PREPARING FOR TOTAL ERASURE..."
-    
-    # 1. Graceful AI Cluster Shutdown
-    log "De-provisioning AI Workloads..."
-    kubectl delete -f k8s/ai-forge/ray-cluster.yaml --ignore-not-found || true
-    
-    # 2. Terraform Destruction
-    cd "$TF_DIR"
-    log "Executing Terraform Destroy..."
-    terraform destroy -auto-approve
+    log "☢️ INITIATING DEPENDENCY-AWARE ERASURE..."
 
-    # 3. The Sweep (Clean up orphaned resources)
-    log "Sweeping Orphaned Network Interfaces & Volumes..."
-    # Force delete any ENIs associated with the cluster security group to prevent VPC deletion hangs
-    SG_ID=$(aws ec2 describe-security-groups --filters Name=tag:Name,Values="*neural-hypernova*" --query "SecurityGroups[0].GroupId" --output text)
-    if [ "$SG_ID" != "None" ]; then
-        aws ec2 describe-network-interfaces --filters Name=group-id,Values="$SG_ID" --query "NetworkInterfaces[*].NetworkInterfaceId" --output text | xargs -I {} aws ec2 delete-network-interface --network-interface-id {} || true
+    # 1. Fetch and Delete Managed Node Groups
+    log "Hunting for Managed Node Groups..."
+    NODE_GROUPS=$(aws eks list-nodegroups --cluster-name neural-hypernova --region us-east-1 --query 'nodegroups' --output text)
+    
+    for ng in $NODE_GROUPS; do
+        log "Dismantling Node Group: $ng..."
+        aws eks delete-nodegroup --cluster-name neural-hypernova --nodegroup-name "$ng" --region us-east-1 || true
+    done
+
+    # 2. Poll for Node Group Deletion (The "Patience" Loop)
+    if [ ! -z "$NODE_GROUPS" ]; then
+        log "Waiting for limbs to detach (this takes ~2-5 mins)..."
+        for ng in $NODE_GROUPS; do
+            aws eks wait nodegroup-deleted --cluster-name neural-hypernova --nodegroup-name "$ng" --region us-east-1 || true
+        done
     fi
 
-    log "🌑 ZERO TRACE REMAINING. HYPERNOVA EXTINGUISHED."
+    # 3. Delete the Brain (The Cluster)
+    log "Limbs detached. Deleting the Brain..."
+    aws eks delete-cluster --name neural-hypernova --region us-east-1 || true
+    aws eks wait cluster-deleted --name neural-hypernova --region us-east-1 || true
+
+    # 4. Terraform Destruction (For VPC/IAM)
+    log "Wiping remaining Infrastructure (VPC/IAM)..."
+    cd "$TF_DIR"
+    terraform init -reconfigure
+    terraform destroy -auto-approve || true
+
+    log "🌑 HYPERNOVA EXTINGUISHED. SYSTEM IS CLEAN."
 }
 
 # --- COMMAND ROUTER ---
