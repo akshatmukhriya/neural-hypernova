@@ -1,6 +1,17 @@
 # Standard Provider Config
 provider "aws" { region = "us-east-1" }
 
+
+resource "aws_security_group_rule" "allow_eks_access" {
+  type              = "ingress"
+  from_port         = 443
+  to_port           = 443
+  protocol          = "tcp"
+  cidr_blocks       = ["0.0.0.0/0"]
+  security_group_id = module.eks.cluster_primary_security_group_id
+}
+
+
 module "vpc" {
   source  = "terraform-aws-modules/vpc/aws"
   version = "~> 5.0"
@@ -27,26 +38,24 @@ module "eks" {
   version = "~> 20.0"
 
   cluster_name    = "neural-hypernova"
-  cluster_version = "1.29"
-  
-  # --- THE FIXES ---
-  create_cloudwatch_log_group = false # Script will handle or we just don't need it for demo
-  create_kms_key              = false # Use default AWS encryption to save costs/collisions
-  cluster_encryption_config   = {}    # Disable custom KMS for the demo to avoid alias conflicts
-  # -----------------
+  cluster_version = "1.31" # Upgraded version
 
-  vpc_id          = module.vpc.vpc_id
-  subnet_ids      = module.vpc.private_subnets
-  
+  # --- CONNECTIVITY FIX ---
+  cluster_endpoint_public_access           = true
+  cluster_endpoint_private_access          = true
+  cluster_endpoint_public_access_cidrs     = ["0.0.0.0/0"] # Open for demo; narrow this in production
   enable_cluster_creator_admin_permissions = true
-  enable_irsa = true
+
+  vpc_id     = module.vpc.vpc_id
+  subnet_ids = module.vpc.private_subnets
 
   eks_managed_node_groups = {
     brain = {
       instance_types = ["t3.medium"]
-      min_size     = 1
-      max_size     = 2
-      desired_size = 1
+      ami_type       = "AL2023_x86_64_STANDARD" # Modern Linux 2023
+      min_size       = 1
+      max_size       = 2
+      desired_size   = 1
     }
   }
 }

@@ -57,12 +57,13 @@ function ignite() {
     helm repo update
 
     # 5. eBPF Data Plane (Cilium)
-    log "Injecting Cilium eBPF (Bypassing Kube-Proxy for Zero-Latency)..."
-    helm upgrade --install cilium cilium/cilium --version 1.15.5 \
+    log "Injecting Cilium eBPF (Kernel-Level Networking)..."
+    # We remove the manual IP detection which was causing the timeout loop
+    helm upgrade --install cilium cilium/cilium --version 1.16.1 \
       --namespace kube-system \
       --set kubeProxyReplacement=true \
-      --set k8sServiceHost=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}') \
-      --set k8sServicePort=6443
+      --set operator.replicas=1 \
+      --wait
 
     # 6. Karpenter (Just-in-Time Scaling)
     log "Initializing Karpenter Node-Provisioner..."
