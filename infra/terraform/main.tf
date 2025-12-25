@@ -60,9 +60,14 @@ module "eks" {
     brain = {
       instance_types = ["t3.medium"]
       ami_type       = "AL2023_x86_64_STANDARD"
-      min_size       = 1
-      max_size       = 2
-      desired_size   = 1
+      
+      # This ensures the IAM role has a predictable name for Karpenter
+      iam_role_use_name_prefix = false
+      iam_role_name            = "KarpenterNodeRole-neural-hypernova"
+      
+      min_size     = 1
+      max_size     = 2
+      desired_size = 1
     }
   }
 }

@@ -11,13 +11,19 @@ spec:
           values: ["spot", "on-demand"]
         - key: "node.kubernetes.io/instance-type"
           operator: In
-          values: ["g5.2xlarge", "p4d.24xlarge"] # Using G5 for cheaper demo testing
+          values: ["g5.2xlarge", "p4d.24xlarge", "p5.48xlarge"]
+        - key: "kubernetes.io/arch"
+          operator: In
+          values: ["amd64"]
       nodeClassRef:
         group: karpenter.k8s.aws
         kind: EC2NodeClass
         name: default
   limits:
     cpu: 1000
+  disruption:
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: 30s
 ---
 apiVersion: karpenter.k8s.aws/v1
 kind: EC2NodeClass
@@ -25,10 +31,13 @@ metadata:
   name: default
 spec:
   amiFamily: AL2023
-  role: "KarpenterNodeRole-neural-hypernova" # Ensure this role exists in IAM
+  # We use the discovery tag to find the right role dynamically
+  role: "KarpenterNodeRole-neural-hypernova" 
   subnetSelectorTerms:
     - tags:
         karpenter.sh/discovery: "neural-hypernova"
   securityGroupSelectorTerms:
     - tags:
         kubernetes.io/cluster/neural-hypernova: "owned"
+  amiSelectorTerms:
+    - alias: al2023@latest # This is the crucial missing piece
