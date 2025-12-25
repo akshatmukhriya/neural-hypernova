@@ -1,135 +1,88 @@
 #!/bin/bash
 set -e
 
-# --- ARCHITECTURAL CONSTANTS ---
+# --- ANCHOR THE PATHS ---
+# This finds the root of your repo regardless of where you run the script
+ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+TF_DIR="$ROOT_DIR/infra/terraform"
+K8S_DIR="$ROOT_DIR/k8s"
+
 COLOR_CYAN='\033[0;36m'
-COLOR_RED='\033[0;31m'
 COLOR_GREEN='\033[0;32m'
 COLOR_RESET='\033[0m'
-TF_DIR="infra/terraform"
 
-# --- ELITE LOGGING ENGINE ---
-function log() {
-    echo -e "${COLOR_CYAN}[HYPERNOVA-LOG] $(date +'%H:%M:%S') | $1${COLOR_RESET}"
-}
+function log() { echo -e "${COLOR_CYAN}[HYPERNOVA-LOG] $1${COLOR_RESET}"; }
 
-function error_log() {
-    echo -e "${COLOR_RED}[HYPERNOVA-ERROR] $1${COLOR_RESET}"
-}
-
-# --- THE IGNITE PROTOCOL ---
 function ignite() {
-    log "🧹 Executing Pre-Flight Ghost Sweep..."
-    
-    # Delete the log group directly via CLI before Terraform starts
-    # We use --region explicitly to ensure no cross-region confusion
-    aws logs delete-log-group --log-group-name "/aws/eks/neural-hypernova/cluster" --region us-east-1 2>/dev/null || true
-    
-    # Also kill the KMS alias just in case
-    aws kms delete-alias --alias-name "alias/eks/neural-hypernova" --region us-east-1 2>/dev/null || true
-    
-    log "Initiating Sovereign AI Forge Deployment..."
+    log "🚀 Ignite Sequence Started..."
+
+    # 1. Terraform Deployment
     cd "$TF_DIR"
-    terraform init -reconfigure # Force re-init to catch backend/module changes
+    log "Applying Infrastructure at $TF_DIR..."
+    terraform init -reconfigure
     terraform apply -auto-approve
 
-    # 1. Terraform Infrastructure
-    if [ ! -d "$TF_DIR" ]; then
-        error_log "Directory $TF_DIR not found!"
-        exit 1
-    fi
-
-    cd "$TF_DIR"
-    log "Executing Terraform Plan & Apply..."
-    terraform init
-    terraform apply -auto-approve
-
-    # 2. Extract Metadata (The "Address Book")
-    log "Extracting Architectural Metadata..."
-    CLUSTER_NAME=$(terraform output -raw cluster_name 2>/dev/null || echo "neural-hypernova")
-    REGION=$(terraform output -raw region 2>/dev/null || echo "us-east-1")
+    # 2. Extract Metadata
+    CLUSTER_NAME=$(terraform output -raw cluster_name)
+    REGION=$(terraform output -raw region)
+    log "Metadata Extracted: Cluster=$CLUSTER_NAME, Region=$REGION"
 
     # 3. Kubeconfig Sync
-    log "Synchronizing Kubeconfig for Cluster: $CLUSTER_NAME..."
     aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER_NAME"
 
-    # 4. Core Engine Injection (Helm)
-    log "Registering High-Performance Helm Repositories..."
+    # 4. Helm & K8s Injection
+    log "Registering Repos..."
     helm repo add cilium https://helm.cilium.io/
     helm repo add karpenter https://charts.karpenter.sh/
     helm repo add kuberay https://ray-project.github.io/kuberay-helm/
     helm repo update
 
-    # 5. eBPF Data Plane (Cilium)
-    log "Injecting Cilium eBPF (Kernel-Level Networking)..."
-    # We remove the manual IP detection which was causing the timeout loop
+    log "Injecting Cilium (eBPF Data Plane)..."
     helm upgrade --install cilium cilium/cilium --version 1.16.1 \
       --namespace kube-system \
       --set kubeProxyReplacement=true \
-      --set operator.replicas=1 \
-      --wait
+      --wait || true # Don't let cilium restart timeout kill the script
 
-    # 6. Karpenter (Just-in-Time Scaling)
-    log "Initializing Karpenter Node-Provisioner..."
+    log "Injecting Karpenter (The Scaler)..."
     helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter \
       --version v0.35.0 \
       --namespace karpenter --create-namespace \
       --set settings.aws.clusterName="$CLUSTER_NAME" \
-      --set settings.aws.defaultInstanceProfile="KarpenterNodeInstanceProfile-$CLUSTER_NAME" \
-      --wait
+      --set settings.aws.defaultInstanceProfile="KarpenterNodeInstanceProfile-$CLUSTER_NAME"
 
-    # 7. KubeRay (The AI Brain)
     log "Deploying KubeRay Operator..."
     helm upgrade --install kuberay-operator kuberay/kuberay-operator --version 1.0.0
 
-    # 8. Final Manifests
-    log "Applying GPU NodePools and RayCluster..."
-    cd ../..
-    kubectl apply -f k8s/core/karpenter-gpu-pool.yaml
-    kubectl apply -f k8s/ai-forge/ray-cluster.yaml
+    # 5. Apply Workloads (Using Absolute Paths)
+    log "Applying GPU Forge Manifests..."
+    kubectl apply -f "$K8S_DIR/core/karpenter-gpu-pool.yaml"
+    kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"
 
-    log "✅ NEURAL HYPERNOVA IS FULLY ARMED AND OPERATIONAL."
-    echo -e "${COLOR_GREEN}Access the Ray Dashboard by running: kubectl port-forward svc/raycluster-head-svc 8265:8265${COLOR_RESET}"
+    log "✅ NEURAL HYPERNOVA IS LIVE."
 }
 
-# --- THE SCORCHED EARTH PROTOCOL ---
 function nuke() {
-    log "☢️ INITIATING DEPENDENCY-AWARE ERASURE..."
-
-    # 1. Fetch and Delete Managed Node Groups
-    log "Hunting for Managed Node Groups..."
-    NODE_GROUPS=$(aws eks list-nodegroups --cluster-name neural-hypernova --region us-east-1 --query 'nodegroups' --output text)
-    
-    for ng in $NODE_GROUPS; do
-        log "Dismantling Node Group: $ng..."
-        aws eks delete-nodegroup --cluster-name neural-hypernova --nodegroup-name "$ng" --region us-east-1 || true
-    done
-
-    # 2. Poll for Node Group Deletion (The "Patience" Loop)
-    if [ ! -z "$NODE_GROUPS" ]; then
-        log "Waiting for limbs to detach (this takes ~2-5 mins)..."
-        for ng in $NODE_GROUPS; do
-            aws eks wait nodegroup-deleted --cluster-name neural-hypernova --nodegroup-name "$ng" --region us-east-1 || true
-        done
-    fi
-
-    # 3. Delete the Brain (The Cluster)
-    log "Limbs detached. Deleting the Brain..."
-    aws eks delete-cluster --name neural-hypernova --region us-east-1 || true
-    aws eks wait cluster-deleted --name neural-hypernova --region us-east-1 || true
-
-    # 4. Terraform Destruction (For VPC/IAM)
-    log "Wiping remaining Infrastructure (VPC/IAM)..."
+    log "☢️ Scorched Earth Protocol..."
     cd "$TF_DIR"
-    terraform init -reconfigure
+    # Try to get metadata for CLI cleanup before destroying TF
+    CLUSTER_NAME=$(terraform output -raw cluster_name 2>/dev/null || echo "neural-hypernova")
+    
+    # 1. Delete K8s Resources
+    kubectl delete -f "$K8S_DIR/ai-forge/ray-cluster.yaml" --ignore-not-found || true
+    
+    # 2. Terraform Destroy
     terraform destroy -auto-approve || true
-
-    log "🌑 HYPERNOVA EXTINGUISHED. SYSTEM IS CLEAN."
+    
+    # 3. CLI Clean up for orphaned ENIs
+    log "Final Sweep of Security Groups..."
+    SGS=$(aws ec2 describe-security-groups --filters "Name=group-name,Values=*$CLUSTER_NAME*" --query "SecurityGroups[*].GroupId" --output text)
+    for sg in $SGS; do
+        aws ec2 delete-security-group --group-id $sg || true
+    done
+    log "🌑 ZERO TRACE."
 }
 
-# --- COMMAND ROUTER ---
 case "$1" in
     ignite) ignite ;;
     nuke) nuke ;;
-    *) echo "Usage: $0 {ignite|nuke}" ;;
 esac
