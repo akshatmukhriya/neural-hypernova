@@ -39,15 +39,15 @@ function bootstrap_foundation() {
 
 # --- THE IGNITE PROTOCOL (Zero to Sovereign) ---
 function ignite() {
-    bootstrap_foundation
-    log "🚀 Ignite Sequence: Neural Hypernova V1.2.0"
-
     cd "$TF_DIR"
-    # Ensure no local state corruption
-    rm -rf .terraform .terraform.lock.hcl 
+    # THE RUTHLESS KILL: Remove the ghost file if it exists in the repo
+    [ -f "backend.tf" ] && rm -f "backend.tf" && log "🔥 Redundant backend.tf purged."
     
-    log "Initializing Terraform..."
-    terraform init $TF_CLI_ARGS_init -reconfigure
+    bootstrap_foundation
+    
+    log "Initializing Terraform with Persistent State..."
+    # We pass the dynamic bucket name directly into the init command
+    terraform init $INIT_ARGS -reconfigure
     terraform apply -auto-approve
 
     # 2. Metadata Extraction
@@ -212,13 +212,15 @@ EOF
 
 # --- THE NUKE PROTOCOL (Total Erasure) ---
 function nuke() {
-    bootstrap_foundation
-    log "☢️ STARTING SOVEREIGN ERASURE..."
-
     cd "$TF_DIR"
-    rm -rf .terraform .terraform.lock.hcl
-    terraform init $TF_CLI_ARGS_init -reconfigure || true
+    # THE RUTHLESS KILL: Remove the ghost file
+    [ -f "backend.tf" ] && rm -f "backend.tf" && log "🔥 Redundant backend.tf purged."
     
+    bootstrap_foundation
+    
+    log "Refreshing State Context..."
+    terraform init $INIT_ARGS -reconfigure || true
+
     # 2. Extract Metadata & Discover Targets
     CLUSTER_NAME=$(terraform output -raw cluster_name 2>/dev/null || echo "neural-hypernova")
     REGION=$(terraform output -raw region 2>/dev/null || echo "us-east-1")
