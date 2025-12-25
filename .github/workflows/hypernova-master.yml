@@ -1,18 +1,19 @@
-name: Neural Hypernova Forge
+name: Neural Hypernova Master Controller
 on: 
   workflow_dispatch:
     inputs:
       operation:
-        description: 'ignite or nuke'
-        default: 'ignite'
+        description: 'Choose your Protocol: ignite | demo | nuke'
+        required: true
+        default: 'demo'
 
 jobs:
-  deploy:
+  execute:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      # The "Unicorn" Way: Use Hashicorp & Kubernetes Official Setup
+      # 1. The Operational Arsenal (Always Present)
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
@@ -32,7 +33,8 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
           aws-region: us-east-1
 
-      - name: Execute Neural Hypernova
+      # 2. Execution Phase
+      - name: Execute Hypernova Protocol
         run: |
           chmod +x ./scripts/hypernova
           ./scripts/hypernova ${{ github.event.inputs.operation }}
