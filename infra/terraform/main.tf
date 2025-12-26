@@ -1,4 +1,4 @@
-# --- NEURAL HYPERNOVA: SOVEREIGN INFRASTRUCTURE V2.2.0 ---
+# --- NEURAL HYPERNOVA: SOVEREIGN INFRASTRUCTURE V2.3.0 ---
 
 terraform {
   required_version = ">= 1.5.0"
@@ -14,10 +14,7 @@ terraform {
 
 provider "aws" { region = "us-east-1" }
 
-variable "runner_arn" {
-  type    = string
-  default = ""
-}
+variable "runner_arn" { type = string; default = "" }
 
 data "aws_caller_identity" "current" {}
 data "http" "lb_policy_json" {
@@ -48,7 +45,7 @@ resource "aws_security_group" "forge_extra" {
   name_prefix = "hypernova-forge-extra-" 
   vpc_id      = module.vpc.vpc_id
 
-  # RULE: Allow ALL from VPC (Bypasses Webhook Deadlocks)
+  # Allow all internal VPC traffic (Critical for HostNetwork Webhooks)
   ingress {
     from_port   = 0
     to_port     = 0
@@ -56,6 +53,7 @@ resource "aws_security_group" "forge_extra" {
     cidr_blocks = ["10.0.0.0/16"]
   }
 
+  # Allow Ray Dashboard
   ingress {
     from_port   = 8265
     to_port     = 8265
