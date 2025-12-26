@@ -77,9 +77,14 @@ function ignite() {
     helm repo add ray-project https://ray-project.github.io/kuberay-helm/
     helm repo update
 
-    log "💉 Injecting Cilium eBPF..."
-    helm upgrade --install cilium cilium/cilium --version 1.16.5 -n kube-system \
-      --set kubeProxyReplacement=true --set debug.verbose="false" --wait
+    log "💉 Injecting Cilium eBPF (Schema-Compliant)..."
+    helm upgrade --install cilium cilium/cilium --version 1.16.5 \
+      --namespace kube-system \
+      --set kubeProxyReplacement=true \
+      --set debug.enabled=false \
+      --set debug.verbose=null \
+      --set operator.replicas=1 \
+      --wait
 
     log "💉 Injecting AWS LBC & Tools..."
     kubectl apply -k "github.com/aws/eks-charts/stable/aws-load-balancer-controller/crds?ref=master"
