@@ -1,16 +1,10 @@
-# --- NEURAL HYPERNOVA: SOVEREIGN INFRASTRUCTURE V1.5.0 ---
+# --- NEURAL HYPERNOVA: SOVEREIGN INFRASTRUCTURE V1.6.0 ---
 
 terraform {
   required_version = ">= 1.5.0"
   required_providers {
-    aws = {
-      source  = "hashicorp/aws"
-      version = "~> 5.0"
-    }
-    http = {
-      source  = "hashicorp/http"
-      version = "~> 3.0"
-    }
+    aws  = { source = "hashicorp/aws", version = "~> 5.0" }
+    http = { source = "hashicorp/http", version = "~> 3.0" }
   }
   backend "s3" {
     key    = "eks/terraform.tfstate"
@@ -18,9 +12,7 @@ terraform {
   }
 }
 
-provider "aws" {
-  region = "us-east-1"
-}
+provider "aws" { region = "us-east-1" }
 
 variable "runner_arn" {
   type    = string
@@ -28,7 +20,6 @@ variable "runner_arn" {
 }
 
 data "aws_caller_identity" "current" {}
-
 data "http" "lb_policy_json" {
   url = "https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/main/docs/install/iam_policy.json"
 }
@@ -37,23 +28,20 @@ data "http" "lb_policy_json" {
 module "vpc" {
   source  = "terraform-aws-modules/vpc/aws"
   version = "5.2.0"
-
-  name = "hypernova-vpc"
-  cidr = "10.0.0.0/16"
-  azs  = ["us-east-1a", "us-east-1b", "us-east-1c"]
-
+  name    = "hypernova-vpc"
+  cidr    = "10.0.0.0/16"
+  azs     = ["us-east-1a", "us-east-1b", "us-east-1c"]
+  
   private_subnets = ["10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24"]
   public_subnets  = ["10.0.101.0/24", "10.0.102.0/24", "10.0.103.0/24"]
 
   enable_nat_gateway = true
-  single_nat_gateway = true
+  single_nat_gateway = true 
 
-  public_subnet_tags = {
-    "kubernetes.io/role/elb" = 1
-  }
-  private_subnet_tags = {
+  public_subnet_tags = { "kubernetes.io/role/elb" = 1 }
+  private_subnet_tags = { 
     "kubernetes.io/role/internal-elb" = 1
-    "karpenter.sh/discovery"          = "neural-hypernova"
+    "karpenter.sh/discovery"          = "neural-hypernova" 
   }
 }
 
@@ -64,54 +52,17 @@ module "eks" {
 
   cluster_name    = "neural-hypernova"
   cluster_version = "1.31"
-
-  vpc_id     = module.vpc.vpc_id
-  subnet_ids = module.vpc.private_subnets
+  vpc_id          = module.vpc.vpc_id
+  subnet_ids      = module.vpc.private_subnets
 
   create_cloudwatch_log_group = false
   authentication_mode         = "API_AND_CONFIG_MAP"
 
-  # PRECISION: Disable the module's auto-generated rules to prevent 'Duplicate' errors
+  # SHUT DOWN INTERNAL GENERATORS
   node_security_group_enable_recommended_rules = false
-
-  node_security_group_additional_rules = {
-    # Rule 1: Allow Control Plane to talk to Kubelet (Required)
-    ingress_cluster_10250 = {
-      description                   = "Cluster API to node kubelet"
-      protocol                      = "tcp"
-      from_port                     = 10250
-      to_port                       = 10250
-      type                          = "ingress"
-      source_cluster_security_group = true
-    }
-    # Rule 2: Allow Control Plane to talk to Webhooks (Fixes the deadlock)
-    ingress_cluster_9443 = {
-      description                   = "Cluster API to node webhook"
-      protocol                      = "tcp"
-      from_port                     = 9443
-      to_port                       = 9443
-      type                          = "ingress"
-      source_cluster_security_group = true
-    }
-    # Rule 3: eBPF Data Plane (Node-to-Node Full Transparency)
-    ingress_self_all = {
-      description = "Node to node all ports/protocols"
-      protocol    = "-1"
-      from_port   = 0
-      to_port     = 65535
-      type        = "ingress"
-      self        = true
-    }
-    # Rule 4: Public access to Ray Dashboard
-    ingress_ray_dash = {
-      description = "Public Ray Dashboard access"
-      protocol    = "tcp"
-      from_port   = 8265
-      to_port     = 8265
-      type        = "ingress"
-      cidr_blocks = ["0.0.0.0/0"]
-    }
-  }
+  
+  # NO ADDITIONAL RULES INSIDE MODULE (Prevents collisions)
+  node_security_group_additional_rules = {}
 
   eks_managed_node_groups = {
     brain = {
@@ -135,9 +86,44 @@ module "eks" {
   }
 }
 
-# --- 3. IAM FOR LBC ---
+# --- 3. STANDALONE SECURITY RULES (The Precision Strike) ---
+
+# Allow Control Plane to talk to Nodes (Webhook 9443 & Kubelet 10250)
+# We use VPC CIDR to bypass the "Security Group Peer Duplicate" error.
+resource "aws_security_group_rule" "control_plane_handshake" {
+  description       = "Allow VPC-internal (Control Plane) to reach Webhooks and Kubelet"
+  type              = "ingress"
+  from_port         = 0
+  to_port           = 65535
+  protocol          = "tcp"
+  cidr_blocks       = ["10.0.0.0/16"] # Bypasses SG-ID collisions
+  security_group_id = module.eks.node_security_group_id
+}
+
+# Allow Node-to-Node for Cilium eBPF
+resource "aws_security_group_rule" "node_to_node" {
+  description       = "Internal node-to-node overlay traffic"
+  type              = "ingress"
+  from_port         = 0
+  to_port           = 65535
+  protocol          = "-1"
+  self              = true
+  security_group_id = module.eks.node_security_group_id
+}
+
+# Allow Public Dashboard
+resource "aws_security_group_rule" "ray_dash" {
+  type              = "ingress"
+  from_port         = 8265
+  to_port           = 8265
+  protocol          = "tcp"
+  cidr_blocks       = ["0.0.0.0/0"]
+  security_group_id = module.eks.node_security_group_id
+}
+
+# --- 4. IAM FOR LBC ---
 resource "aws_iam_policy" "lb_controller" {
-  name   = "AWSLoadBalancerControllerIAMPolicy"
+  name   = "AWSLoadBalancerControllerIAMPolicy-Hypernova"
   policy = data.http.lb_policy_json.response_body
 }
 
@@ -149,11 +135,7 @@ resource "aws_iam_role" "lb_controller" {
       Action = "sts:AssumeRoleWithWebIdentity"
       Effect = "Allow"
       Principal = { Federated = module.eks.oidc_provider_arn }
-      Condition = {
-        StringEquals = {
-          "${module.eks.oidc_provider}:sub" = "system:serviceaccount:kube-system:aws-load-balancer-controller"
-        }
-      }
+      Condition = { StringEquals = { "${module.eks.oidc_provider}:sub" = "system:serviceaccount:kube-system:aws-load-balancer-controller" }}
     }]
   })
 }
@@ -163,7 +145,7 @@ resource "aws_iam_role_policy_attachment" "lb_controller_attach" {
   policy_arn = aws_iam_policy.lb_controller.arn
 }
 
-# --- 4. OUTPUTS ---
+# --- 5. OUTPUTS ---
 output "cluster_name" { value = module.eks.cluster_name }
 output "region"       { value = "us-east-1" }
 output "vpc_id"       { value = module.vpc.vpc_id }

@@ -13,7 +13,7 @@ COLOR_RESET='\033[0m'
 function log() { echo -e "${COLOR_CYAN}[HYPERNOVA-LOG] $(date +'%H:%M:%S') | $1${COLOR_RESET}"; }
 
 function bootstrap() {
-    log "📡 Detecting Identity..."
+    log "📡 Detecting Cloud Context..."
     RUNNER_ARN=$(aws sts get-caller-identity --query Arn --output text)
     ACCOUNT_ID=$(echo $RUNNER_ARN | cut -d: -f5)
     
@@ -33,7 +33,7 @@ function bootstrap() {
 
 function ignite() {
     bootstrap
-    log "🚀 Ignite Sequence: Neural Hypernova V1.5.0"
+    log "🚀 Ignite Sequence: Neural Hypernova V1.6.0"
     cd "$TF_DIR"
     
     rm -rf .terraform .terraform.lock.hcl
@@ -72,6 +72,7 @@ function ignite() {
     log "💉 Injecting KubeRay..."
     helm upgrade --install kuberay-operator ray-project/kuberay-operator --version 1.2.2 --wait
 
+    log "🏗️ Applying Forge Manifests..."
     kubectl apply -f "$K8S_DIR/core/karpenter-gpu-pool.yaml"
     kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"
     log "✅ NEURAL HYPERNOVA IS LIVE."
@@ -87,27 +88,55 @@ function nuke() {
     VPC_ID=$(terraform output -raw vpc_id 2>/dev/null || echo "")
     REGION="us-east-1"
 
-    log "1. De-provisioning LoadBalancers..."
-    kubectl delete svc hypernova-dashboard-lb --ignore-not-found --timeout=30s || true
+    log "1. Cleanup Kubernetes..."
+    kubectl delete svc hypernova-dashboard-lb --ignore-not-found --timeout=20s || true
     
-    # Critical: Kill any dangling NLBs using the VPC ID directly
-    LBS=$(aws elbv2 describe-load-balancers --region $REGION --query "LoadBalancers[?VpcId=='$VPC_ID'].LoadBalancerArn" --output text)
-    for lb in $LBS; do aws elbv2 delete-load-balancer --load-balancer-arn "$lb" --region $REGION || true; done
-
-    log "2. Releasing Elastic IPs (Breaking IGW Deadlock)..."
+    log "2. Release Public Mappings..."
     EIPS=$(aws ec2 describe-addresses --region $REGION --query "Addresses[?VpcId=='$VPC_ID'].AllocationId" --output text)
     for eip in $EIPS; do aws ec2 release-address --allocation-id "$eip" --region $REGION || true; done
 
-    log "3. Terraform Destruction..."
+    log "3. Destruction..."
     terraform destroy "${APPLY_OPTS[@]}" || true
     
-    log "4. Manual ENI Cleanup..."
     if [ ! -z "$VPC_ID" ] && [ "$VPC_ID" != "null" ]; then
+        log "4. Deep Sweep..."
         ENIS=$(aws ec2 describe-network-interfaces --filters "Name=vpc-id,Values=$VPC_ID" --query "NetworkInterfaces[*].NetworkInterfaceId" --output text)
         for eni in $ENIS; do aws ec2 delete-network-interface --network-interface-id "$eni" || true; done
         aws eks delete-cluster --name neural-hypernova --region $REGION || true
     fi
     log "🌑 ZERO TRACE."
+}
+
+function demo() {
+    bootstrap
+    log "🎭 Launching Spectator..."
+    cd "$TF_DIR"
+    terraform init "${INIT_OPTS[@]}" -reconfigure > /dev/null
+    NAME=$(terraform output -raw cluster_name)
+    aws eks update-kubeconfig --region us-east-1 --name "$NAME"
+
+    kubectl apply -f - <<EOF
+apiVersion: v1
+kind: Service
+metadata:
+  name: hypernova-dashboard-lb
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: external
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: instance
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+spec:
+  type: LoadBalancer
+  selector: { ray.io/node-type: head }
+  ports: [{ name: dash, port: 8265, targetPort: 8265 }]
+EOF
+
+    log "Waiting for DNS..."
+    URL=""
+    while [ -z "$URL" ]; do
+        URL=$(kubectl get svc hypernova-dashboard-lb -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+        [ -z "$URL" ] && sleep 10
+    done
+    log "🚀 DASHBOARD: http://$URL:8265"
 }
 
 case "$1" in
