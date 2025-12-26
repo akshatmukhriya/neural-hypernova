@@ -132,40 +132,40 @@ resource "aws_iam_role_policy_attachment" "lb_controller_attach" {
 }
 
 # --- 5. SECURITY ---
-# We use 'cluster_primary_security_group_id' AND the cluster security group
-resource "aws_security_group_rule" "lbc_webhook_inbound_primary" {
+# Rule 1: Public access to Ray Dashboard
+resource "aws_security_group_rule" "ray_dash" {
+  type              = "ingress"
+  from_port         = 8265
+  to_port           = 8265
+  protocol          = "tcp"
+  cidr_blocks       = ["0.0.0.0/0"]
+  security_group_id = module.eks.node_security_group_id
+}
+
+# Rule 2: Webhook Path (Port 9443)
+# Conssolidated to a single rule to prevent "InvalidPermission.Duplicate"
+resource "aws_security_group_rule" "lbc_webhook_inbound" {
+  description              = "Allow EKS Control Plane to reach LBC Webhook"
   type                     = "ingress"
   from_port                = 9443
   to_port                  = 9443
   protocol                 = "tcp"
+  security_group_id        = module.eks.node_security_group_id
   source_security_group_id = module.eks.cluster_primary_security_group_id
-  security_group_id        = module.eks.node_security_group_id
 }
 
-resource "aws_security_group_rule" "lbc_webhook_inbound_cluster" {
-  type                     = "ingress"
-  from_port                = 9443
-  to_port                  = 9443
-  protocol                 = "tcp"
-  source_security_group_id = module.eks.cluster_security_group_id
-  security_group_id        = module.eks.node_security_group_id
-}
-
-# Rule 3: THE SECRET SAUCE - Node-to-Node All Traffic
-# Cilium eBPF requires total transparency between nodes to manage the 
-# high-speed AI data plane and pod-to-pod encapsulation.
+# Rule 3: eBPF Data Plane (Node-to-Node)
 resource "aws_security_group_rule" "node_to_node_all" {
+  description              = "Allow all node-to-node traffic for Cilium eBPF"
   type                     = "ingress"
   from_port                = 0
   to_port                  = 65535
   protocol                 = "-1"
-  source_security_group_id = module.eks.node_security_group_id
   security_group_id        = module.eks.node_security_group_id
+  source_security_group_id = module.eks.node_security_group_id
 }
 
-# Rule 4: NLB Health Checks (Internal VPC)
-# This ensures the AWS NLB can verify the Ray Head is alive 
-# without hitting a timeout.
+# Rule 4: NLB Health Checks
 resource "aws_security_group_rule" "nlb_health_checks" {
   description       = "Allow NLB Health Checks from VPC"
   type              = "ingress"
