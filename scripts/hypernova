@@ -5,11 +5,12 @@ set -e
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 TF_DIR="$ROOT_DIR/infra/terraform"
 K8S_DIR="$ROOT_DIR/k8s"
+
 COLOR_CYAN='\033[0;36m'
 COLOR_GREEN='\033[0;32m'
 COLOR_RESET='\033[0m'
 
-function log() { echo -e "${COLOR_CYAN}[HYPERNOVA] $(date +'%H:%M:%S') | $1${COLOR_RESET}"; }
+function log() { echo -e "${COLOR_CYAN}[HYPERNOVA-LOG] $(date +'%H:%M:%S') | $1${COLOR_RESET}"; }
 
 function bootstrap() {
     log "📡 Detecting Identity..."
@@ -32,8 +33,9 @@ function bootstrap() {
 
 function ignite() {
     bootstrap
-    log "🚀 Ignite Sequence: V1.4.2"
+    log "🚀 Ignite Sequence: Neural Hypernova V1.5.0"
     cd "$TF_DIR"
+    
     rm -rf .terraform .terraform.lock.hcl
     terraform init "${INIT_OPTS[@]}" -reconfigure
     terraform apply "${APPLY_OPTS[@]}"
@@ -44,46 +46,69 @@ function ignite() {
 
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
 
-    log "🛡️ Phase 1: Shielding Namespaces..."
-    kubectl create namespace karpenter --dry-run=client -o yaml | kubectl apply -f -
-    kubectl label namespace kube-system elbv2.k8s.aws/pod-readiness-gate-inject=disabled --overwrite
-    kubectl label namespace karpenter elbv2.k8s.aws/pod-readiness-gate-inject=disabled --overwrite
-
-    log "💉 Phase 2: Injecting Cilium eBPF..."
+    log "🛠️ Registering Global Repos..."
     helm repo add cilium https://helm.cilium.io/
+    helm repo add eks https://aws.github.io/eks-charts
+    helm repo add ray-project https://ray-project.github.io/kuberay-helm/
     helm repo update
+
+    log "💉 Injecting Cilium eBPF..."
     helm upgrade --install cilium cilium/cilium --version 1.16.5 -n kube-system \
       --set kubeProxyReplacement=true --set debug.verbose="" --wait
 
-    log "💉 Phase 3: Injecting AWS Load Balancer Controller..."
+    log "💉 Injecting AWS LBC (FailurePolicy: Ignore)..."
     kubectl delete mutatingwebhookconfiguration elbv2.k8s.aws-mutating-webhook-configuration --ignore-not-found
     kubectl apply -f https://raw.githubusercontent.com/aws/eks-charts/master/stable/aws-load-balancer-controller/crds/crds.yaml
-    
-    helm repo add eks https://aws.github.io/eks-charts
-    helm repo update
     helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system \
       --set clusterName="$NAME" --set serviceAccount.create=true \
       --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="$ROLE_ARN" \
       --set region=us-east-1 --set vpcId="$VPC_ID" \
       --set webhookConfig.failurePolicy=Ignore --wait
 
-    log "💉 Phase 4: Injecting Karpenter..."
+    log "💉 Injecting Karpenter..."
     helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter --version 1.1.1 \
-      --namespace karpenter --set settings.clusterName="$NAME" --wait
+      --namespace karpenter --create-namespace --set settings.clusterName="$NAME" --wait
 
-    log "💉 Phase 5: Injecting KubeRay..."
-    helm repo add ray-project https://ray-project.github.io/kuberay-helm/
-    helm repo update
+    log "💉 Injecting KubeRay..."
     helm upgrade --install kuberay-operator ray-project/kuberay-operator --version 1.2.2 --wait
 
-    log "🏗️ Applying Forge Manifests..."
     kubectl apply -f "$K8S_DIR/core/karpenter-gpu-pool.yaml"
     kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"
-    
-    log "✅ NEURAL HYPERNOVA IS ARMED."
+    log "✅ NEURAL HYPERNOVA IS LIVE."
 }
 
-# (Add your robust nuke and demo functions here)
+function nuke() {
+    bootstrap
+    log "☢️ SCORCHED EARTH PROTOCOL..."
+    cd "$TF_DIR"
+    rm -rf .terraform .terraform.lock.hcl
+    terraform init "${INIT_OPTS[@]}" -reconfigure || true
+    
+    VPC_ID=$(terraform output -raw vpc_id 2>/dev/null || echo "")
+    REGION="us-east-1"
+
+    log "1. De-provisioning LoadBalancers..."
+    kubectl delete svc hypernova-dashboard-lb --ignore-not-found --timeout=30s || true
+    
+    # Critical: Kill any dangling NLBs using the VPC ID directly
+    LBS=$(aws elbv2 describe-load-balancers --region $REGION --query "LoadBalancers[?VpcId=='$VPC_ID'].LoadBalancerArn" --output text)
+    for lb in $LBS; do aws elbv2 delete-load-balancer --load-balancer-arn "$lb" --region $REGION || true; done
+
+    log "2. Releasing Elastic IPs (Breaking IGW Deadlock)..."
+    EIPS=$(aws ec2 describe-addresses --region $REGION --query "Addresses[?VpcId=='$VPC_ID'].AllocationId" --output text)
+    for eip in $EIPS; do aws ec2 release-address --allocation-id "$eip" --region $REGION || true; done
+
+    log "3. Terraform Destruction..."
+    terraform destroy "${APPLY_OPTS[@]}" || true
+    
+    log "4. Manual ENI Cleanup..."
+    if [ ! -z "$VPC_ID" ] && [ "$VPC_ID" != "null" ]; then
+        ENIS=$(aws ec2 describe-network-interfaces --filters "Name=vpc-id,Values=$VPC_ID" --query "NetworkInterfaces[*].NetworkInterfaceId" --output text)
+        for eni in $ENIS; do aws ec2 delete-network-interface --network-interface-id "$eni" || true; done
+        aws eks delete-cluster --name neural-hypernova --region $REGION || true
+    fi
+    log "🌑 ZERO TRACE."
+}
 
 case "$1" in
     ignite) ignite ;;
