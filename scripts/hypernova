@@ -1,24 +1,23 @@
 #!/bin/bash
 set -e
 
+# --- ANCHORS ---
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 TF_DIR="$ROOT_DIR/infra/terraform"
 K8S_DIR="$ROOT_DIR/k8s"
 
 COLOR_CYAN='\033[0;36m'
-COLOR_RED='\033[0;31m'
 COLOR_GREEN='\033[0;32m'
 COLOR_RESET='\033[0m'
 
 function log() { echo -e "${COLOR_CYAN}[HYPERNOVA-LOG] $(date +'%H:%M:%S') | $1${COLOR_RESET}"; }
-function error_log() { echo -e "${COLOR_RED}[HYPERNOVA-ERROR] $1${COLOR_RESET}"; }
 
 function bootstrap() {
     log "📡 Detecting Identity..."
     RUNNER_ARN=$(aws sts get-caller-identity --query Arn --output text)
     ACCOUNT_ID=$(echo $RUNNER_ARN | cut -d: -f5)
     
-    # Strip assumed-role session for EKS Access Entry compatibility
+    # Clean ARN for EKS Access Entry
     if [[ $RUNNER_ARN == *"assumed-role"* ]]; then
         ROLE_NAME=$(echo $RUNNER_ARN | cut -d/ -f2)
         CLEAN_ARN="arn:aws:iam::$ACCOUNT_ID:role/$ROLE_NAME"
@@ -27,140 +26,76 @@ function bootstrap() {
     fi
 
     BUCKET="hypernova-state-$ACCOUNT_ID"
-    REGION="us-east-1"
-
-    if ! aws s3 ls "s3://$BUCKET" > /dev/null 2>&1; then
-        log "🏗️ Creating S3 Foundation: $BUCKET"
-        aws s3 mb "s3://$BUCKET" --region $REGION
-        aws s3api put-bucket-versioning --bucket "$BUCKET" --versioning-configuration Status=Enabled
-    fi
+    [ ! -z "$(aws s3 ls s3://$BUCKET 2>&1 | grep 'NoSuchBucket')" ] && aws s3 mb "s3://$BUCKET"
     
+    # Use Array for Terraform Args to prevent shell-quoting errors
     INIT_OPTS=(-backend-config="bucket=$BUCKET")
     APPLY_OPTS=(-var="runner_arn=$CLEAN_ARN" -auto-approve)
 }
 
 function ignite() {
     bootstrap
-    log "🚀 Ignite Sequence Active"
+    log "🚀 Ignite Sequence: Neural Hypernova V1.2.5"
     cd "$TF_DIR"
     
-    # Clean the path
+    # Purge Cache
     rm -rf .terraform .terraform.lock.hcl
-    [ -f "backend.tf" ] && rm -f "backend.tf"
-    [ -f "outputs.tf" ] && rm -f "outputs.tf"
-
-    log "Initializing Infrastructure Synthesis..."
     terraform init "${INIT_OPTS[@]}" -reconfigure
     terraform apply "${APPLY_OPTS[@]}"
 
     NAME=$(terraform output -raw cluster_name)
+    VPC_ID=$(terraform output -raw vpc_id)
+    ROLE_ARN=$(terraform output -raw lb_role_arn)
+
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
 
-    log "⏳ Warming up EKS 1.31 Authentication (Identity Mapping)..."
-    local ATTEMPTS=0
-    until kubectl get nodes --request-timeout='5s' > /dev/null 2>&1 || [ $ATTEMPTS -eq 15 ]; do
-        log "Waiting for RBAC propagation... (Attempt $((ATTEMPTS+1))/15)"
-        sleep 15
-        ATTEMPTS=$((ATTEMPTS+1))
-    done
-
-    log "🛠️ Registering Global Repos..."
+    log "🛠️ Registering Repos..."
     helm repo add cilium https://helm.cilium.io/
     helm repo add eks https://aws.github.io/eks-charts
     helm repo add ray-project https://ray-project.github.io/kuberay-helm/
     helm repo update
 
-    log "💉 Injecting Cilium eBPF (Optimized Core)..."
-    # FIXED: Removed debug.verbose to bypass the Helm template type bug
-    helm upgrade --install cilium cilium/cilium --version 1.16.5 \
-      --namespace kube-system \
-      --set kubeProxyReplacement=true \
-      --wait
+    log "💉 Injecting Cilium..."
+    helm upgrade --install cilium cilium/cilium --version 1.16.5 -n kube-system --set kubeProxyReplacement=true --set debug.verbose="false" --wait
 
-    log "💉 Injecting AWS Load Balancer Controller..."
-    ROLE_ARN=$(terraform output -raw lb_role_arn)
-    VPC_ID=$(terraform output -raw vpc_id)
+    log "💉 Injecting AWS LBC..."
     kubectl apply -k "github.com/aws/eks-charts/stable/aws-load-balancer-controller/crds?ref=master"
-    helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
-      --namespace kube-system \
-      --set clusterName="$NAME" \
-      --set serviceAccount.create=true \
+    helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system \
+      --set clusterName="$NAME" --set serviceAccount.create=true \
       --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="$ROLE_ARN" \
-      --set region=us-east-1 \
-      --set vpcId="$VPC_ID" \
-      --wait
+      --set region=us-east-1 --set vpcId="$VPC_ID" --wait
 
-    log "💉 Injecting Scaling & AI Layers (Karpenter/Ray)..."
-    helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter \
-      --version 1.1.1 --namespace karpenter --create-namespace \
-      --set settings.clusterName="$NAME" --wait
-    
-    helm upgrade --install kuberay-operator ray-project/kuberay-operator --version 1.2.2
+    log "💉 Injecting Karpenter & AI Forge..."
+    helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter --version 1.1.1 -n karpenter --create-namespace --set settings.clusterName="$NAME" --wait
+    helm upgrade --install kuberay-operator ray-project/kuberay-operator --version 1.2.2 --wait
 
-    log "🧬 Applying Sovereign Manifests..."
     kubectl apply -f "$K8S_DIR/core/karpenter-gpu-pool.yaml"
     kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"
-    
     log "✅ NEURAL HYPERNOVA IS LIVE."
 }
 
 function nuke() {
     bootstrap
-    log "☢️ STARTING SOVEREIGN ERASURE..."
+    log "☢️ SCORCHED EARTH..."
     cd "$TF_DIR"
-    
     rm -rf .terraform .terraform.lock.hcl
-    [ -f "backend.tf" ] && rm -f "backend.tf"
     terraform init "${INIT_OPTS[@]}" -reconfigure || true
     
-    VPC_ID=$(terraform output -raw vpc_id 2>/dev/null || aws ec2 describe-vpcs --filters "Name=tag:Name,Values=hypernova-vpc" --query "Vpcs[0].VpcId" --output text || echo "")
-
-    log "⚔️ Clearing ENIs and LoadBalancers..."
-    kubectl delete svc hypernova-dashboard-lb --ignore-not-found --timeout=20s || true
+    VPC_ID=$(terraform output -raw vpc_id 2>/dev/null || echo "")
     
-    # Force kill the cluster to stop ENI spawning
-    CLUSTER_NAME=$(terraform output -raw cluster_name 2>/dev/null || echo "neural-hypernova")
-    aws eks delete-cluster --name "$CLUSTER_NAME" --region us-east-1 2>/dev/null || true
+    # 1. Kill LBs
+    kubectl delete svc hypernova-dashboard-lb --ignore-not-found --timeout=30s || true
     
-    if [ ! -z "$VPC_ID" ] && [ "$VPC_ID" != "None" ]; then
+    # 2. Terraform Destroy
+    terraform destroy "${APPLY_OPTS[@]}" || true
+    
+    # 3. Final Sweep
+    if [ ! -z "$VPC_ID" ] && [ "$VPC_ID" != "null" ]; then
         ENIS=$(aws ec2 describe-network-interfaces --filters "Name=vpc-id,Values=$VPC_ID" --query "NetworkInterfaces[*].NetworkInterfaceId" --output text)
-        for eni in $ENIS; do aws ec2 delete-network-interface --network-interface-id $eni || true; done
+        for eni in $ENIS; do aws ec2 delete-network-interface --network-interface-id "$eni" || true; done
+        aws eks delete-cluster --name neural-hypernova --region us-east-1 || true
     fi
-
-    terraform destroy -auto-approve || true
     log "🌑 ZERO TRACE."
-}
-
-function demo() {
-    bootstrap
-    log "🎭 Launching Spectator Protocol..."
-    cd "$TF_DIR"
-    terraform init "${INIT_OPTS[@]}" -reconfigure > /dev/null
-    NAME=$(terraform output -raw cluster_name)
-    aws eks update-kubeconfig --region us-east-1 --name "$NAME"
-
-    kubectl apply -f - <<EOF
-apiVersion: v1
-kind: Service
-metadata:
-  name: hypernova-dashboard-lb
-  annotations:
-    service.beta.kubernetes.io/aws-load-balancer-type: external
-    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: instance
-    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
-spec:
-  type: LoadBalancer
-  selector: { ray.io/node-type: head }
-  ports: [{ name: dash, port: 8265, targetPort: 8265 }]
-EOF
-
-    log "⌛ Resolving DNS..."
-    URL=""
-    while [ -z "$URL" ]; do
-        URL=$(kubectl get svc hypernova-dashboard-lb -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
-        sleep 10
-    done
-    log "🚀 FORGE URL: http://$URL:8265"
 }
 
 case "$1" in
