@@ -17,7 +17,6 @@ function bootstrap() {
     RUNNER_ARN=$(aws sts get-caller-identity --query Arn --output text)
     ACCOUNT_ID=$(echo $RUNNER_ARN | cut -d: -f5)
     
-    # Clean ARN for EKS Access Entry
     if [[ $RUNNER_ARN == *"assumed-role"* ]]; then
         ROLE_NAME=$(echo $RUNNER_ARN | cut -d/ -f2)
         CLEAN_ARN="arn:aws:iam::$ACCOUNT_ID:role/$ROLE_NAME"
@@ -26,19 +25,18 @@ function bootstrap() {
     fi
 
     BUCKET="hypernova-state-$ACCOUNT_ID"
-    [ ! -z "$(aws s3 ls s3://$BUCKET 2>&1 | grep 'NoSuchBucket')" ] && aws s3 mb "s3://$BUCKET"
+    # Ensure bucket exists
+    aws s3 mb "s3://$BUCKET" --region us-east-1 2>/dev/null || true
     
-    # Use Array for Terraform Args to prevent shell-quoting errors
     INIT_OPTS=(-backend-config="bucket=$BUCKET")
     APPLY_OPTS=(-var="runner_arn=$CLEAN_ARN" -auto-approve)
 }
 
 function ignite() {
     bootstrap
-    log "🚀 Ignite Sequence: Neural Hypernova V1.2.5"
+    log "🚀 Ignite Sequence: Neural Hypernova V1.2.6"
     cd "$TF_DIR"
     
-    # Purge Cache
     rm -rf .terraform .terraform.lock.hcl
     terraform init "${INIT_OPTS[@]}" -reconfigure
     terraform apply "${APPLY_OPTS[@]}"
@@ -49,23 +47,22 @@ function ignite() {
 
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
 
-    log "🛠️ Registering Repos..."
+    log "💉 Injecting Cilium..."
     helm repo add cilium https://helm.cilium.io/
+    helm repo update
+    helm upgrade --install cilium cilium/cilium --version 1.16.5 -n kube-system --set kubeProxyReplacement=true --set debug.verbose="false" --wait
+
+    log "💉 Injecting AWS LBC & Tools..."
     helm repo add eks https://aws.github.io/eks-charts
     helm repo add ray-project https://ray-project.github.io/kuberay-helm/
     helm repo update
 
-    log "💉 Injecting Cilium..."
-    helm upgrade --install cilium cilium/cilium --version 1.16.5 -n kube-system --set kubeProxyReplacement=true --set debug.verbose="false" --wait
-
-    log "💉 Injecting AWS LBC..."
     kubectl apply -k "github.com/aws/eks-charts/stable/aws-load-balancer-controller/crds?ref=master"
     helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system \
       --set clusterName="$NAME" --set serviceAccount.create=true \
       --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="$ROLE_ARN" \
       --set region=us-east-1 --set vpcId="$VPC_ID" --wait
 
-    log "💉 Injecting Karpenter & AI Forge..."
     helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter --version 1.1.1 -n karpenter --create-namespace --set settings.clusterName="$NAME" --wait
     helm upgrade --install kuberay-operator ray-project/kuberay-operator --version 1.2.2 --wait
 
@@ -82,18 +79,25 @@ function nuke() {
     terraform init "${INIT_OPTS[@]}" -reconfigure || true
     
     VPC_ID=$(terraform output -raw vpc_id 2>/dev/null || echo "")
-    
-    # 1. Kill LBs
+    REGION="us-east-1"
+
+    log "1. Removing K8s Services..."
     kubectl delete svc hypernova-dashboard-lb --ignore-not-found --timeout=30s || true
     
-    # 2. Terraform Destroy
+    log "2. Releasing Elastic IPs (Fixing 'mapped public address' deadlock)..."
+    EIPS=$(aws ec2 describe-addresses --region $REGION --query "Addresses[?VpcId=='$VPC_ID'].AllocationId" --output text)
+    for eip in $EIPS; do
+        aws ec2 release-address --allocation-id "$eip" --region $REGION || true
+    done
+
+    log "3. Terraform Destroy..."
     terraform destroy "${APPLY_OPTS[@]}" || true
     
-    # 3. Final Sweep
+    log "4. Manual ENI Cleanup..."
     if [ ! -z "$VPC_ID" ] && [ "$VPC_ID" != "null" ]; then
         ENIS=$(aws ec2 describe-network-interfaces --filters "Name=vpc-id,Values=$VPC_ID" --query "NetworkInterfaces[*].NetworkInterfaceId" --output text)
         for eni in $ENIS; do aws ec2 delete-network-interface --network-interface-id "$eni" || true; done
-        aws eks delete-cluster --name neural-hypernova --region us-east-1 || true
+        aws eks delete-cluster --name neural-hypernova --region $REGION || true
     fi
     log "🌑 ZERO TRACE."
 }
