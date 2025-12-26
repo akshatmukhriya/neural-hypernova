@@ -141,6 +141,41 @@ resource "aws_security_group_rule" "ray_dash" {
   security_group_id = module.eks.node_security_group_id
 }
 
+resource "aws_security_group_rule" "lbc_webhook_inbound" {
+  type              = "ingress"
+  from_port         = 9443
+  to_port           = 9443
+  protocol          = "tcp"
+  source_security_group_id = module.eks.cluster_primary_security_group_id
+  security_group_id        = module.eks.node_security_group_id
+}
+
+# Rule 3: THE SECRET SAUCE - Node-to-Node All Traffic
+# Cilium eBPF requires total transparency between nodes to manage the 
+# high-speed AI data plane and pod-to-pod encapsulation.
+resource "aws_security_group_rule" "node_to_node_all" {
+  description              = "Allow all node-to-node traffic for Cilium eBPF"
+  type                     = "ingress"
+  from_port                = 0
+  to_port                  = 65535
+  protocol                 = "-1" # All protocols
+  security_group_id        = module.eks.node_security_group_id
+  source_security_group_id = module.eks.node_security_group_id
+}
+
+# Rule 4: NLB Health Checks (Internal VPC)
+# This ensures the AWS NLB can verify the Ray Head is alive 
+# without hitting a timeout.
+resource "aws_security_group_rule" "nlb_health_checks" {
+  description       = "Allow NLB Health Checks from VPC"
+  type              = "ingress"
+  from_port         = 0
+  to_port           = 65535
+  protocol          = "tcp"
+  cidr_blocks       = [module.vpc.vpc_cidr_block]
+  security_group_id = module.eks.node_security_group_id
+}
+
 # --- 6. OUTPUTS ---
 output "cluster_name" {
   value = module.eks.cluster_name
