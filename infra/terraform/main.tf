@@ -1,10 +1,16 @@
-# --- NEURAL HYPERNOVA: SOVEREIGN INFRASTRUCTURE V2.3.0 ---
+# --- NEURAL HYPERNOVA: SOVEREIGN INFRASTRUCTURE V2.3.1 ---
 
 terraform {
   required_version = ">= 1.5.0"
   required_providers {
-    aws  = { source = "hashicorp/aws", version = "~> 5.0" }
-    http = { source = "hashicorp/http", version = "~> 3.0" }
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+    http = {
+      source  = "hashicorp/http"
+      version = "~> 3.0"
+    }
   }
   backend "s3" {
     key    = "eks/terraform.tfstate"
@@ -12,15 +18,23 @@ terraform {
   }
 }
 
-provider "aws" { region = "us-east-1" }
+provider "aws" {
+  region = "us-east-1"
+}
 
-variable "runner_arn" { type = string; default = "" }
+# --- 1. GLOBAL VARIABLES ---
+variable "runner_arn" {
+  type    = string
+  default = ""
+}
 
+# --- 2. DATA SOURCES ---
 data "aws_caller_identity" "current" {}
 data "http" "lb_policy_json" {
   url = "https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/main/docs/install/iam_policy.json"
 }
 
+# --- 3. NETWORK (VPC) ---
 module "vpc" {
   source  = "terraform-aws-modules/vpc/aws"
   version = "5.2.0"
@@ -34,18 +48,22 @@ module "vpc" {
   enable_nat_gateway = true
   single_nat_gateway = true 
 
-  public_subnet_tags = { "kubernetes.io/role/elb" = 1 }
+  public_subnet_tags = {
+    "kubernetes.io/role/elb" = 1
+  }
   private_subnet_tags = { 
     "kubernetes.io/role/internal-elb" = 1
     "karpenter.sh/discovery"          = "neural-hypernova" 
   }
 }
 
+# --- 4. DEDICATED FORGE SECURITY GROUP ---
 resource "aws_security_group" "forge_extra" {
   name_prefix = "hypernova-forge-extra-" 
+  description = "Bypass rules for Webhooks and eBPF"
   vpc_id      = module.vpc.vpc_id
 
-  # Allow all internal VPC traffic (Critical for HostNetwork Webhooks)
+  # Allow all internal VPC traffic for HostNetwork Webhooks
   ingress {
     from_port   = 0
     to_port     = 0
@@ -53,7 +71,7 @@ resource "aws_security_group" "forge_extra" {
     cidr_blocks = ["10.0.0.0/16"]
   }
 
-  # Allow Ray Dashboard
+  # Ray Dashboard Public Access
   ingress {
     from_port   = 8265
     to_port     = 8265
@@ -68,9 +86,13 @@ resource "aws_security_group" "forge_extra" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  lifecycle { create_before_destroy = true }
+  lifecycle {
+    create_before_destroy = true
+  }
+  tags = { Name = "hypernova-forge-extra-sg" }
 }
 
+# --- 5. EKS CLUSTER (1.31) ---
 module "eks" {
   source  = "terraform-aws-modules/eks/aws"
   version = "20.24.0"
@@ -107,6 +129,7 @@ module "eks" {
   }
 }
 
+# --- 6. IAM FOR LOAD BALANCER CONTROLLER ---
 resource "aws_iam_policy" "lb_controller" {
   name   = "AWSLoadBalancerControllerIAMPolicy-Hypernova"
   policy = data.http.lb_policy_json.response_body
@@ -120,7 +143,11 @@ resource "aws_iam_role" "lb_controller" {
       Action = "sts:AssumeRoleWithWebIdentity"
       Effect = "Allow"
       Principal = { Federated = module.eks.oidc_provider_arn }
-      Condition = { StringEquals = { "${module.eks.oidc_provider}:sub" = "system:serviceaccount:kube-system:aws-load-balancer-controller" }}
+      Condition = {
+        StringEquals = {
+          "${module.eks.oidc_provider}:sub" = "system:serviceaccount:kube-system:aws-load-balancer-controller"
+        }
+      }
     }]
   })
 }
@@ -130,6 +157,7 @@ resource "aws_iam_role_policy_attachment" "lb_controller_attach" {
   policy_arn = aws_iam_policy.lb_controller.arn
 }
 
+# --- 7. OUTPUTS ---
 output "cluster_name" { value = module.eks.cluster_name }
 output "region"       { value = "us-east-1" }
 output "vpc_id"       { value = module.vpc.vpc_id }
