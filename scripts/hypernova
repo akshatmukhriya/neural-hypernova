@@ -40,7 +40,7 @@ function bootstrap() {
 
 function ignite() {
     bootstrap
-    log "🚀 Ignite Sequence: Neural Hypernova V1.4.0 (Industrial Precision)"
+    log "🚀 Ignite Sequence: Neural Hypernova V1.4.1"
     cd "$TF_DIR"
     
     rm -rf .terraform .terraform.lock.hcl
@@ -53,10 +53,8 @@ function ignite() {
 
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
 
-    # --- THE IMMUNITY SHIELD ---
     log "🛡️ Phase 1: Shielding Infrastructure Namespaces..."
     kubectl create namespace karpenter --dry-run=client -o yaml | kubectl apply -f -
-    # Disable webhook injection for system namespaces to prevent the deadlock loop
     kubectl label namespace kube-system elbv2.k8s.aws/pod-readiness-gate-inject=disabled --overwrite
     kubectl label namespace karpenter elbv2.k8s.aws/pod-readiness-gate-inject=disabled --overwrite
 
@@ -66,8 +64,7 @@ function ignite() {
     helm upgrade --install cilium cilium/cilium --version 1.16.5 -n kube-system \
       --set kubeProxyReplacement=true --set debug.verbose="" --wait
 
-    log "💉 Phase 3: Injecting AWS LBC (Non-Blocking Mode)..."
-    # Scorch any previous hanging webhooks
+    log "💉 Phase 3: Injecting AWS LBC (Immune failurePolicy)..."
     kubectl delete mutatingwebhookconfiguration elbv2.k8s.aws-mutating-webhook-configuration --ignore-not-found
     kubectl delete validatingwebhookconfiguration elbv2.k8s.aws-validating-webhook-configuration --ignore-not-found
     
@@ -76,8 +73,7 @@ function ignite() {
     helm repo add eks https://aws.github.io/eks-charts
     helm repo update
     
-    # THE UNICORN FIX: webhookConfig.failurePolicy=Ignore
-    # This prevents the controller from ever blocking resource creation during cold starts
+    # THE CRITICAL FIX: failurePolicy=Ignore
     helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system \
       --set clusterName="$NAME" \
       --set serviceAccount.create=true \
@@ -87,26 +83,24 @@ function ignite() {
       --set webhookConfig.failurePolicy=Ignore \
       --wait
 
-    log "💉 Phase 4: Injecting Karpenter..."
-    # Now that namespaces are shielded and LBC is non-blocking, this will succeed
+    log "💉 Phase 4: Injecting Karpenter & AI Forge..."
     helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter --version 1.1.1 \
       --namespace karpenter --set settings.clusterName="$NAME" --wait
-
-    log "💉 Phase 5: Injecting KubeRay Operator..."
+    
     helm repo add ray-project https://ray-project.github.io/kuberay-helm/
     helm repo update
     helm upgrade --install kuberay-operator ray-project/kuberay-operator --version 1.2.2 --wait
 
-    log "🏗️ Phase 6: Applying Neural Forge Workloads..."
+    log "🏗️ Final Manifest Application..."
     kubectl apply -f "$K8S_DIR/core/karpenter-gpu-pool.yaml"
     kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"
     
-    log "✅ NEURAL HYPERNOVA IS ARMED."
+    log "✅ NEURAL HYPERNOVA IS LIVE."
 }
 
 function nuke() {
     bootstrap
-    log "☢️ STARTING JANITOR PURGE..."
+    log "☢️ STARTING SOVEREIGN ERASURE..."
     cd "$TF_DIR"
     rm -rf .terraform .terraform.lock.hcl
     terraform init "${INIT_OPTS[@]}" -reconfigure || true
@@ -114,26 +108,22 @@ function nuke() {
     VPC_ID=$(terraform output -raw vpc_id 2>/dev/null || echo "")
     CLUSTER_NAME="neural-hypernova"
 
-    log "1. Removing K8s Services..."
+    log "1. Releasing Network Dependencies (EIP/LBs)..."
     kubectl delete svc hypernova-dashboard-lb --ignore-not-found --timeout=30s || true
-    
-    log "2. Releasing Network Dependencies..."
     EIPS=$(aws ec2 describe-addresses --region us-east-1 --query "Addresses[?VpcId=='$VPC_ID'].AllocationId" --output text)
     for eip in $EIPS; do aws ec2 release-address --allocation-id "$eip" --region us-east-1 || true; done
 
-    log "3. Infrastructure Destruction..."
+    log "2. Infrastructure Destruction..."
     terraform destroy "${APPLY_OPTS[@]}" || true
     
     if [ ! -z "$VPC_ID" ] && [ "$VPC_ID" != "null" ]; then
-        log "4. Manual ENI Cleanup..."
+        log "3. Manual ENI Cleanup..."
         ENIS=$(aws ec2 describe-network-interfaces --filters "Name=vpc-id,Values=$VPC_ID" --query "NetworkInterfaces[*].NetworkInterfaceId" --output text)
         for eni in $ENIS; do aws ec2 delete-network-interface --network-interface-id "$eni" || true; done
         aws eks delete-cluster --name "$CLUSTER_NAME" --region us-east-1 || true
     fi
     log "🌑 ZERO TRACE."
 }
-
-# (Add your demo function here - same pattern as others)
 
 case "$1" in
     ignite) ignite ;;

@@ -1,4 +1,4 @@
-# --- NEURAL HYPERNOVA: SOVEREIGN INFRASTRUCTURE V1.4.0 ---
+# --- NEURAL HYPERNOVA: SOVEREIGN INFRASTRUCTURE V1.4.1 ---
 
 terraform {
   required_version = ">= 1.5.0"
@@ -12,15 +12,23 @@ terraform {
   }
 }
 
-provider "aws" { region = "us-east-1" }
+provider "aws" {
+  region = "us-east-1"
+}
 
-variable "runner_arn" { type = string; default = "" }
+# --- 1. GLOBAL VARIABLES ---
+variable "runner_arn" {
+  type    = string
+  default = ""
+}
 
+# --- 2. DATA SOURCES ---
 data "aws_caller_identity" "current" {}
 data "http" "lb_policy_json" {
   url = "https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/main/docs/install/iam_policy.json"
 }
 
+# --- 3. NETWORK (VPC) ---
 module "vpc" {
   source  = "terraform-aws-modules/vpc/aws"
   version = "5.2.0"
@@ -34,13 +42,16 @@ module "vpc" {
   enable_nat_gateway = true
   single_nat_gateway = true 
 
-  public_subnet_tags = { "kubernetes.io/role/elb" = 1 }
+  public_subnet_tags = {
+    "kubernetes.io/role/elb" = 1
+  }
   private_subnet_tags = { 
     "kubernetes.io/role/internal-elb" = 1
     "karpenter.sh/discovery"          = "neural-hypernova" 
   }
 }
 
+# --- 4. THE BRAIN (EKS 1.31) ---
 module "eks" {
   source  = "terraform-aws-modules/eks/aws"
   version = "20.24.0"
@@ -53,7 +64,7 @@ module "eks" {
   create_cloudwatch_log_group = false
   authentication_mode         = "API_AND_CONFIG_MAP"
 
-  # PRECISION CONNECTIVITY: Internal EKS rules for Webhooks and eBPF
+  # UNICORN PERIMETER: Consolidated rules to prevent AWS Duplicate Rules errors
   node_security_group_additional_rules = {
     ingress_self_all = {
       description = "Node to node all ports/protocols"
@@ -79,6 +90,14 @@ module "eks" {
       type        = "ingress"
       cidr_blocks = ["0.0.0.0/0"]
     }
+    ingress_nlb_health = {
+      description = "NLB Health Checks from VPC"
+      protocol    = "tcp"
+      from_port   = 0
+      to_port     = 65535
+      type        = "ingress"
+      cidr_blocks = ["10.0.0.0/16"] # Match your VPC CIDR
+    }
   }
 
   eks_managed_node_groups = {
@@ -103,6 +122,7 @@ module "eks" {
   }
 }
 
+# --- 5. IAM FOR LBC ---
 resource "aws_iam_policy" "lb_controller" {
   name   = "AWSLoadBalancerControllerIAMPolicy-Hypernova"
   policy = data.http.lb_policy_json.response_body
@@ -116,7 +136,11 @@ resource "aws_iam_role" "lb_controller" {
       Action = "sts:AssumeRoleWithWebIdentity"
       Effect = "Allow"
       Principal = { Federated = module.eks.oidc_provider_arn }
-      Condition = { StringEquals = { "${module.eks.oidc_provider}:sub" = "system:serviceaccount:kube-system:aws-load-balancer-controller" }}
+      Condition = { 
+        StringEquals = { 
+          "${module.eks.oidc_provider}:sub" = "system:serviceaccount:kube-system:aws-load-balancer-controller" 
+        } 
+      }
     }]
   })
 }
@@ -126,6 +150,7 @@ resource "aws_iam_role_policy_attachment" "lb_controller_attach" {
   policy_arn = aws_iam_policy.lb_controller.arn
 }
 
+# --- 6. METADATA OUTPUTS ---
 output "cluster_name" { value = module.eks.cluster_name }
 output "region"       { value = "us-east-1" }
 output "vpc_id"       { value = module.vpc.vpc_id }
