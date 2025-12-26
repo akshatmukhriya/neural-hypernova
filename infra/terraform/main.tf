@@ -132,7 +132,6 @@ resource "aws_iam_role_policy_attachment" "lb_controller_attach" {
 }
 
 # --- 5. SECURITY ---
-# Rule 1: Public access to Ray Dashboard
 resource "aws_security_group_rule" "ray_dash" {
   type              = "ingress"
   from_port         = 8265
@@ -142,19 +141,19 @@ resource "aws_security_group_rule" "ray_dash" {
   security_group_id = module.eks.node_security_group_id
 }
 
-# Rule 2: Webhook Path (Port 9443)
-# Conssolidated to a single rule to prevent "InvalidPermission.Duplicate"
-resource "aws_security_group_rule" "lbc_webhook_inbound" {
-  description              = "Allow EKS Control Plane to reach LBC Webhook"
-  type                     = "ingress"
-  from_port                = 9443
-  to_port                  = 9443
-  protocol                 = "tcp"
-  security_group_id        = module.eks.node_security_group_id
-  source_security_group_id = module.eks.cluster_primary_security_group_id
+# Webhook Access: Allow the VPC CIDR to hit 9443
+# This is more reliable than targeting the Cluster SG ID
+resource "aws_security_group_rule" "lbc_webhook_vpc" {
+  description       = "Allow VPC (EKS Control Plane) to reach LBC Webhook"
+  type              = "ingress"
+  from_port         = 9443
+  to_port           = 9443
+  protocol          = "tcp"
+  cidr_blocks       = [module.vpc.vpc_cidr_block]
+  security_group_id = module.eks.node_security_group_id
 }
 
-# Rule 3: eBPF Data Plane (Node-to-Node)
+# eBPF Data Plane: Full Node-to-Node
 resource "aws_security_group_rule" "node_to_node_all" {
   description              = "Allow all node-to-node traffic for Cilium eBPF"
   type                     = "ingress"
@@ -165,9 +164,8 @@ resource "aws_security_group_rule" "node_to_node_all" {
   source_security_group_id = module.eks.node_security_group_id
 }
 
-# Rule 4: NLB Health Checks
+# NLB Health Checks
 resource "aws_security_group_rule" "nlb_health_checks" {
-  description       = "Allow NLB Health Checks from VPC"
   type              = "ingress"
   from_port         = 0
   to_port           = 65535
