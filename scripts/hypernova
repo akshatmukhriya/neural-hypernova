@@ -7,13 +7,15 @@ TF_DIR="$ROOT_DIR/infra/terraform"
 K8S_DIR="$ROOT_DIR/k8s"
 
 COLOR_CYAN='\033[0;36m'
+COLOR_RED='\033[0;31m'
 COLOR_GREEN='\033[0;32m'
 COLOR_RESET='\033[0m'
 
 function log() { echo -e "${COLOR_CYAN}[HYPERNOVA-LOG] $(date +'%H:%M:%S') | $1${COLOR_RESET}"; }
+function error_log() { echo -e "${COLOR_RED}[HYPERNOVA-ERROR] $1${COLOR_RESET}"; }
 
 function bootstrap() {
-    log "📡 Detecting Identity..."
+    log "📡 Detecting Cloud Context..."
     RUNNER_ARN=$(aws sts get-caller-identity --query Arn --output text)
     ACCOUNT_ID=$(echo $RUNNER_ARN | cut -d: -f5)
     
@@ -25,8 +27,12 @@ function bootstrap() {
     fi
 
     BUCKET="hypernova-state-$ACCOUNT_ID"
-    # Ensure bucket exists
-    aws s3 mb "s3://$BUCKET" --region us-east-1 2>/dev/null || true
+    REGION="us-east-1"
+
+    if ! aws s3 ls "s3://$BUCKET" > /dev/null 2>&1; then
+        log "🏗️ Creating Foundation: $BUCKET"
+        aws s3 mb "s3://$BUCKET" --region $REGION
+    fi
     
     INIT_OPTS=(-backend-config="bucket=$BUCKET")
     APPLY_OPTS=(-var="runner_arn=$CLEAN_ARN" -auto-approve)
@@ -34,7 +40,7 @@ function bootstrap() {
 
 function ignite() {
     bootstrap
-    log "🚀 Ignite Sequence: V1.3.6 (The Phantom Purge)"
+    log "🚀 Ignite Sequence: Neural Hypernova V1.4.0 (Industrial Precision)"
     cd "$TF_DIR"
     
     rm -rf .terraform .terraform.lock.hcl
@@ -44,94 +50,90 @@ function ignite() {
     NAME=$(terraform output -raw cluster_name)
     VPC_ID=$(terraform output -raw vpc_id)
     ROLE_ARN=$(terraform output -raw lb_role_arn)
-    REGION="us-east-1"
 
-    aws eks update-kubeconfig --region "$REGION" --name "$NAME"
+    aws eks update-kubeconfig --region us-east-1 --name "$NAME"
 
-    # --- THE PHANTOM PURGE (The Ultimate Fix) ---
-    log "🧹 Purging Global Webhook Phantoms (Lobotomy Protocol)..."
-    # We delete ALL webhooks related to LBC to ensure the API Server doesn't hang
-    kubectl delete mutatingwebhookconfiguration --all || true
-    kubectl delete validatingwebhookconfiguration --all || true
-    
-    # Give the API Server 10 seconds to realize the sentries are gone
-    sleep 10
-
-    log "🛡️ Phase 1: Shielding System Namespaces..."
+    # --- THE IMMUNITY SHIELD ---
+    log "🛡️ Phase 1: Shielding Infrastructure Namespaces..."
     kubectl create namespace karpenter --dry-run=client -o yaml | kubectl apply -f -
+    # Disable webhook injection for system namespaces to prevent the deadlock loop
     kubectl label namespace kube-system elbv2.k8s.aws/pod-readiness-gate-inject=disabled --overwrite
     kubectl label namespace karpenter elbv2.k8s.aws/pod-readiness-gate-inject=disabled --overwrite
 
-    log "💉 Phase 2: Injecting Cilium eBPF (The Foundation)..."
-    # This will now succeed because the Webhooks are gone
+    log "💉 Phase 2: Injecting Cilium eBPF Foundation..."
     helm repo add cilium https://helm.cilium.io/
     helm repo update
     helm upgrade --install cilium cilium/cilium --version 1.16.5 -n kube-system \
       --set kubeProxyReplacement=true --set debug.verbose="" --wait
 
-    log "💉 Phase 3: Injecting AWS Load Balancer Controller (Immune Mode)..."
-    # Install CRDs
+    log "💉 Phase 3: Injecting AWS LBC (Non-Blocking Mode)..."
+    # Scorch any previous hanging webhooks
+    kubectl delete mutatingwebhookconfiguration elbv2.k8s.aws-mutating-webhook-configuration --ignore-not-found
+    kubectl delete validatingwebhookconfiguration elbv2.k8s.aws-validating-webhook-configuration --ignore-not-found
+    
     kubectl apply -f https://raw.githubusercontent.com/aws/eks-charts/master/stable/aws-load-balancer-controller/crds/crds.yaml
     
     helm repo add eks https://aws.github.io/eks-charts
     helm repo update
     
-    # We re-install LBC with the Ignore policy
+    # THE UNICORN FIX: webhookConfig.failurePolicy=Ignore
+    # This prevents the controller from ever blocking resource creation during cold starts
     helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system \
       --set clusterName="$NAME" \
       --set serviceAccount.create=true \
       --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="$ROLE_ARN" \
-      --set region="$REGION" \
+      --set region=us-east-1 \
       --set vpcId="$VPC_ID" \
       --set webhookConfig.failurePolicy=Ignore \
       --wait
 
     log "💉 Phase 4: Injecting Karpenter..."
+    # Now that namespaces are shielded and LBC is non-blocking, this will succeed
     helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter --version 1.1.1 \
       --namespace karpenter --set settings.clusterName="$NAME" --wait
 
-    log "💉 Phase 5: Injecting KubeRay..."
+    log "💉 Phase 5: Injecting KubeRay Operator..."
     helm repo add ray-project https://ray-project.github.io/kuberay-helm/
     helm repo update
     helm upgrade --install kuberay-operator ray-project/kuberay-operator --version 1.2.2 --wait
 
-    log "🏗️ Phase 6: Applying AI Forge Manifests..."
+    log "🏗️ Phase 6: Applying Neural Forge Workloads..."
     kubectl apply -f "$K8S_DIR/core/karpenter-gpu-pool.yaml"
     kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"
     
-    log "✅ NEURAL HYPERNOVA IS LIVE."
+    log "✅ NEURAL HYPERNOVA IS ARMED."
 }
 
 function nuke() {
     bootstrap
-    log "☢️ SCORCHED EARTH..."
+    log "☢️ STARTING JANITOR PURGE..."
     cd "$TF_DIR"
     rm -rf .terraform .terraform.lock.hcl
     terraform init "${INIT_OPTS[@]}" -reconfigure || true
     
     VPC_ID=$(terraform output -raw vpc_id 2>/dev/null || echo "")
-    REGION="us-east-1"
+    CLUSTER_NAME="neural-hypernova"
 
     log "1. Removing K8s Services..."
     kubectl delete svc hypernova-dashboard-lb --ignore-not-found --timeout=30s || true
     
-    log "2. Releasing Elastic IPs (Fixing 'mapped public address' deadlock)..."
-    EIPS=$(aws ec2 describe-addresses --region $REGION --query "Addresses[?VpcId=='$VPC_ID'].AllocationId" --output text)
-    for eip in $EIPS; do
-        aws ec2 release-address --allocation-id "$eip" --region $REGION || true
-    done
+    log "2. Releasing Network Dependencies..."
+    EIPS=$(aws ec2 describe-addresses --region us-east-1 --query "Addresses[?VpcId=='$VPC_ID'].AllocationId" --output text)
+    for eip in $EIPS; do aws ec2 release-address --allocation-id "$eip" --region us-east-1 || true; done
 
-    log "3. Terraform Destroy..."
+    log "3. Infrastructure Destruction..."
     terraform destroy "${APPLY_OPTS[@]}" || true
     
-    log "4. Manual ENI Cleanup..."
     if [ ! -z "$VPC_ID" ] && [ "$VPC_ID" != "null" ]; then
+        log "4. Manual ENI Cleanup..."
         ENIS=$(aws ec2 describe-network-interfaces --filters "Name=vpc-id,Values=$VPC_ID" --query "NetworkInterfaces[*].NetworkInterfaceId" --output text)
         for eni in $ENIS; do aws ec2 delete-network-interface --network-interface-id "$eni" || true; done
-        aws eks delete-cluster --name neural-hypernova --region $REGION || true
+        aws eks delete-cluster --name "$CLUSTER_NAME" --region us-east-1 || true
     fi
     log "🌑 ZERO TRACE."
 }
+
+# (Add your demo function here - same pattern as others)
 
 case "$1" in
     ignite) ignite ;;
