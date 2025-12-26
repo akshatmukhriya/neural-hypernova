@@ -28,29 +28,31 @@ function bootstrap() {
 
 function ignite() {
     bootstrap
-    log "🚀 Igniting V4.0.0..."
+    log "🚀 Igniting V5.0.0..."
     cd "$TF_DIR"
+    
+    # RUTHLESS CACHE WIPE: Fixes the 'Unreadable module' bug
     rm -rf .terraform .terraform.lock.hcl
+    
     terraform init "${INIT_OPTS[@]}" -reconfigure
     terraform apply "${APPLY_OPTS[@]}"
 
     NAME=$(terraform output -raw cluster_name)
+    VPC_ID=$(terraform output -raw vpc_id)
+    ROLE_ARN=$(terraform output -raw lb_role_arn)
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
 
-    log "🛠️ Injecting Layers..."
+    log "🛠️ Registering Repos..."
     helm repo add cilium https://helm.cilium.io/
     helm repo add eks https://aws.github.io/eks-charts
     helm repo add ray https://ray-project.github.io/kuberay-helm/
     helm repo update
 
-    log "💉 Cilium eBPF (Background Init)..."
-    # We remove --wait to prevent the timeout you saw
+    log "💉 Cilium eBPF..."
     helm upgrade --install cilium cilium/cilium --version 1.16.5 -n kube-system \
       --set kubeProxyReplacement=true --set-string debug.verbose=""
 
     log "💉 AWS LBC..."
-    ROLE_ARN=$(terraform output -raw lb_role_arn)
-    VPC_ID=$(terraform output -raw vpc_id)
     kubectl apply -f https://raw.githubusercontent.com/aws/eks-charts/master/stable/aws-load-balancer-controller/crds/crds.yaml
     helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system \
       --set clusterName="$NAME" --set serviceAccount.create=true \
@@ -64,7 +66,6 @@ function ignite() {
     helm upgrade --install kuberay ray/kuberay-operator --version 1.2.2
 
     log "🏗️ Manifests..."
-    # Give the API server a moment to stabilize
     sleep 30
     kubectl apply -f "$K8S_DIR/core/karpenter-gpu-pool.yaml"
     kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"
@@ -79,21 +80,22 @@ function nuke() {
     terraform init "${INIT_OPTS[@]}" -reconfigure || true
     
     VPC_ID=$(terraform output -raw vpc_id 2>/dev/null || echo "")
+    REGION="us-east-1"
     CLUSTER_NAME="neural-hypernova"
 
     log "1. CLI Purge..."
     kubectl delete svc hypernova-dashboard-lb --ignore-not-found || true
-    aws eks delete-nodegroup --cluster-name "$CLUSTER_NAME" --nodegroup-name brain --region us-east-1 2>/dev/null || true
-    aws eks delete-cluster --name "$CLUSTER_NAME" --region us-east-1 2>/dev/null || true
+    aws eks delete-nodegroup --cluster-name "$CLUSTER_NAME" --nodegroup-name brain --region $REGION 2>/dev/null || true
+    aws eks delete-cluster --name "$CLUSTER_NAME" --region $REGION 2>/dev/null || true
 
-    log "2. Resource Release..."
-    EIPS=$(aws ec2 describe-addresses --region us-east-1 --query "Addresses[?VpcId=='$VPC_ID'].AllocationId" --output text)
-    for eip in $EIPS; do aws ec2 release-address --allocation-id "$eip" --region us-east-1 || true; done
+    log "2. EIP Release..."
+    EIPS=$(aws ec2 describe-addresses --region $REGION --query "Addresses[?VpcId=='$VPC_ID'].AllocationId" --output text)
+    for eip in $EIPS; do aws ec2 release-address --allocation-id "$eip" --region $REGION || true; done
 
-    log "3. Terraform Destruction..."
+    log "3. Terraform Destroy..."
     terraform destroy "${APPLY_OPTS[@]}" || true
     
-    log "4. Deep Sweep..."
+    log "4. ENI Sweep..."
     if [ ! -z "$VPC_ID" ] && [ "$VPC_ID" != "null" ]; then
         ENIS=$(aws ec2 describe-network-interfaces --filters "Name=vpc-id,Values=$VPC_ID" --query "NetworkInterfaces[*].NetworkInterfaceId" --output text)
         for eni in $ENIS; do aws ec2 delete-network-interface --network-interface-id "$eni" || true; done

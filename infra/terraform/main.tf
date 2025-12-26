@@ -1,4 +1,4 @@
-# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V4.0.0 ---
+# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V5.0.0 ---
 
 terraform {
   required_version = ">= 1.5.0"
@@ -19,6 +19,8 @@ variable "runner_arn" {
   default = ""
 }
 
+data "aws_caller_identity" "current" {}
+
 data "http" "lb_policy" {
   url = "https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/main/docs/install/iam_policy.json"
 }
@@ -37,7 +39,9 @@ module "vpc" {
   enable_nat_gateway = true
   single_nat_gateway = true 
 
-  public_subnet_tags = { "kubernetes.io/role/elb" = 1 }
+  public_subnet_tags = {
+    "kubernetes.io/role/elb" = 1
+  }
   private_subnet_tags = { 
     "kubernetes.io/role/internal-elb" = 1
     "karpenter.sh/discovery"          = "neural-hypernova" 
@@ -58,10 +62,8 @@ module "eks" {
   authentication_mode         = "API_AND_CONFIG_MAP"
   cluster_endpoint_public_access = true
 
-  # Let the module create and manage the Security Group perfectly
   node_security_group_enable_recommended_rules = true
 
-  # Inject custom rules for Ray and internal VPC
   node_security_group_additional_rules = {
     ingress_ray = {
       description = "Ray Dashboard"
@@ -88,7 +90,6 @@ module "eks" {
       min_size       = 1
       max_size       = 2
       desired_size   = 1
-      # Using module-managed IAM role for 100% join success
     }
   }
 
@@ -105,27 +106,42 @@ module "eks" {
   }
 }
 
-# --- 3. IAM FOR LBC ---
+# --- 3. RAW IAM FOR LOAD BALANCER CONTROLLER (The Unbreakable Fix) ---
 resource "aws_iam_policy" "lb_controller" {
-  name   = "AWSLBCPolicy-Hypernova"
-  policy = data.http.lb_policy.response_body
+  name        = "AWSLBCPolicy-Hypernova"
+  description = "Permissions for AWS Load Balancer Controller"
+  policy      = data.http.lb_policy.response_body
 }
 
-module "lb_role" {
-  source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
-  role_name = "lb-controller-hypernova"
-  attach_load_balancer_controller_policy = false # We use our own
-  role_policy_arns = { policy = aws_iam_policy.lb_controller.arn }
-  oidc_providers = {
-    main = {
-      provider_arn               = module.eks.oidc_provider_arn
-      namespace_service_accounts = ["kube-system:aws-load-balancer-controller"]
-    }
-  }
+resource "aws_iam_role" "lb_controller" {
+  name = "lb-controller-hypernova"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Federated = module.eks.oidc_provider_arn
+        }
+        Action = "sts:AssumeRoleWithWebIdentity"
+        Condition = {
+          StringEquals = {
+            "${module.eks.oidc_provider}:sub" = "system:serviceaccount:kube-system:aws-load-balancer-controller"
+          }
+        }
+      }
+    ]
+  })
 }
 
+resource "aws_iam_role_policy_attachment" "lb_controller_attach" {
+  policy_arn = aws_iam_policy.lb_controller.arn
+  role       = aws_iam_role.lb_controller.name
+}
+
+# --- 4. OUTPUTS ---
 output "cluster_name" { value = module.eks.cluster_name }
 output "region"       { value = "us-east-1" }
 output "vpc_id"       { value = module.vpc.vpc_id }
-output "lb_role_arn"  { value = module.lb_role.iam_role_arn }
-output "node_role_arn" { value = module.eks.eks_managed_node_groups["brain"].iam_role_arn }
+output "lb_role_arn"  { value = aws_iam_role.lb_controller.arn }
