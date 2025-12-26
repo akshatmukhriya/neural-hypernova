@@ -1,4 +1,4 @@
-# --- NEURAL HYPERNOVA: SOVEREIGN INFRASTRUCTURE V2.0.0 ---
+# --- NEURAL HYPERNOVA: SOVEREIGN INFRASTRUCTURE V2.1.0 ---
 
 terraform {
   required_version = ">= 1.5.0"
@@ -47,7 +47,6 @@ module "vpc" {
 
 # --- 2. DEDICATED FORGE SECURITY GROUP ---
 resource "aws_security_group" "forge_extra" {
-  # THE FIX: Use name_prefix to avoid "AlreadyExists" errors
   name_prefix = "hypernova-forge-extra-" 
   description = "Custom rules to avoid EKS module collisions"
   vpc_id      = module.vpc.vpc_id
@@ -73,10 +72,7 @@ resource "aws_security_group" "forge_extra" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  lifecycle {
-    create_before_destroy = true
-  }
-
+  lifecycle { create_before_destroy = true }
   tags = { Name = "hypernova-forge-extra-sg" }
 }
 
@@ -96,18 +92,18 @@ module "eks" {
   cluster_endpoint_public_access       = true
   cluster_endpoint_public_access_cidrs = ["0.0.0.0/0"]
 
-  cluster_security_group_additional_rules = {
-    ingress_public_443 = {
-      description = "Allow HTTPS from Internet to API Server"
-      protocol    = "tcp"
-      from_port   = 443
-      to_port     = 443
-      type        = "ingress"
-      cidr_blocks = ["0.0.0.0/0"]
+  # THE UNICORN FIREWALL: Allow EVERYTHING from the Control Plane to the Nodes
+  # This ensures webhooks are never blocked by the AWS fabric.
+  node_security_group_additional_rules = {
+    ingress_cluster_all = {
+      description                   = "Allow all traffic from cluster control plane"
+      protocol                      = "-1"
+      from_port                     = 0
+      to_port                       = 0
+      type                          = "ingress"
+      source_cluster_security_group = true
     }
   }
-
-  node_security_group_enable_recommended_rules = true
 
   eks_managed_node_groups = {
     brain = {
