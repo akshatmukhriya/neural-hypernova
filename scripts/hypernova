@@ -5,7 +5,6 @@ set -e
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 TF_DIR="$ROOT_DIR/infra/terraform"
 K8S_DIR="$ROOT_DIR/k8s"
-
 COLOR_CYAN='\033[0;36m'
 COLOR_GREEN='\033[0;32m'
 COLOR_RESET='\033[0m'
@@ -13,7 +12,7 @@ COLOR_RESET='\033[0m'
 function log() { echo -e "${COLOR_CYAN}[HYPERNOVA-LOG] $(date +'%H:%M:%S') | $1${COLOR_RESET}"; }
 
 function bootstrap() {
-    log "📡 Detecting Cloud Context..."
+    log "📡 Detecting Identity..."
     RUNNER_ARN=$(aws sts get-caller-identity --query Arn --output text)
     ACCOUNT_ID=$(echo $RUNNER_ARN | cut -d: -f5)
     
@@ -33,7 +32,7 @@ function bootstrap() {
 
 function ignite() {
     bootstrap
-    log "🚀 Ignite Sequence: V2.1.0 (Sequential Pressurization)"
+    log "🚀 Ignite Sequence: V2.2.0 (The Final Fix)"
     cd "$TF_DIR"
     
     rm -rf .terraform .terraform.lock.hcl
@@ -45,56 +44,46 @@ function ignite() {
     ROLE_ARN=$(terraform output -raw lb_role_arn)
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
 
-    log "🛠️ Registering Global Repos..."
-    helm repo add cilium https://helm.cilium.io/
-    helm repo add eks https://aws.github.io/eks-charts
-    helm repo add ray-project https://ray-project.github.io/kuberay-helm/
-    helm repo update
-
-    # --- STEP 1: PRESSURIZE NETWORK ---
     log "💉 Injecting Cilium eBPF..."
+    helm repo add cilium https://helm.cilium.io/
+    helm repo update
     helm upgrade --install cilium cilium/cilium --version 1.16.5 -n kube-system \
       --set kubeProxyReplacement=true --set-string debug.verbose="" --wait
 
-    log "⏳ Waiting for Networking Convergence (Cilium Pods Ready)..."
-    kubectl wait --for=condition=ready -n kube-system pod -l k8s-app=cilium --timeout=300s
-    sleep 30 # Final buffer for eBPF map propagation
+    log "⏳ Waiting for Cilium Data-Plane (60s)..."
+    sleep 60
 
-    # --- STEP 2: BYPASS WEBHOOKS ---
-    log "💉 Injecting AWS Load Balancer Controller..."
-    # Scorch any phantoms before install
+    log "💉 Injecting AWS Load Balancer Controller (Atomic Mode)..."
     kubectl delete mutatingwebhookconfiguration --all || true
     kubectl apply -f https://raw.githubusercontent.com/aws/eks-charts/master/stable/aws-load-balancer-controller/crds/crds.yaml
     
+    helm repo add eks https://aws.github.io/eks-charts
+    helm repo update
+    
+    # THE KILL-SWITCH: Disable the Service Mutator which causes the deadlock
     helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system \
       --set clusterName="$NAME" --set serviceAccount.create=true \
       --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="$ROLE_ARN" \
       --set region=us-east-1 --set vpcId="$VPC_ID" \
+      --set enableServiceMutator=false \
       --set webhookConfig.failurePolicy=Ignore --wait
 
-    # THE NUCLEAR OVERRIDE: Delete the webhook configuration immediately after LBC install
-    # This prevents it from blocking Karpenter/Ray while the LBC pod warms up
-    log "🧹 Neutralizing Webhooks for Bootstrap..."
-    kubectl delete mutatingwebhookconfiguration elbv2.k8s.aws-mutating-webhook-configuration --ignore-not-found
-    kubectl delete validatingwebhookconfiguration elbv2.k8s.aws-validating-webhook-configuration --ignore-not-found
-
-    # --- STEP 3: SCALE AI FORGE ---
     log "💉 Injecting Karpenter..."
     helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter --version 1.1.1 \
       --namespace karpenter --create-namespace --set settings.clusterName="$NAME" --wait
 
     log "💉 Injecting KubeRay..."
+    helm repo add ray-project https://ray-project.github.io/kuberay-helm/
+    helm repo update
     helm upgrade --install kuberay-operator ray-project/kuberay-operator --version 1.2.2 --wait
 
     log "🏗️ Applying Forge Manifests..."
     kubectl apply -f "$K8S_DIR/core/karpenter-gpu-pool.yaml"
     kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"
-    
     log "✅ NEURAL HYPERNOVA IS LIVE."
 }
 
-# (Keep nuke/demo as they were in V2.0.0)
-
+# (Keep nuke/demo as they were)
 case "$1" in
     ignite) ignite ;;
     nuke) nuke ;;

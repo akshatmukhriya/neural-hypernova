@@ -1,4 +1,4 @@
-# --- NEURAL HYPERNOVA: SOVEREIGN INFRASTRUCTURE V2.1.0 ---
+# --- NEURAL HYPERNOVA: SOVEREIGN INFRASTRUCTURE V2.2.0 ---
 
 terraform {
   required_version = ">= 1.5.0"
@@ -24,7 +24,6 @@ data "http" "lb_policy_json" {
   url = "https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/main/docs/install/iam_policy.json"
 }
 
-# --- 1. NETWORK ---
 module "vpc" {
   source  = "terraform-aws-modules/vpc/aws"
   version = "5.2.0"
@@ -45,17 +44,16 @@ module "vpc" {
   }
 }
 
-# --- 2. DEDICATED FORGE SECURITY GROUP ---
 resource "aws_security_group" "forge_extra" {
   name_prefix = "hypernova-forge-extra-" 
-  description = "Custom rules to avoid EKS module collisions"
   vpc_id      = module.vpc.vpc_id
 
+  # RULE: Allow ALL from VPC (Bypasses Webhook Deadlocks)
   ingress {
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
-    cidr_blocks = [module.vpc.vpc_cidr_block]
+    cidr_blocks = ["10.0.0.0/16"]
   }
 
   ingress {
@@ -73,10 +71,8 @@ resource "aws_security_group" "forge_extra" {
   }
 
   lifecycle { create_before_destroy = true }
-  tags = { Name = "hypernova-forge-extra-sg" }
 }
 
-# --- 3. EKS CLUSTER ---
 module "eks" {
   source  = "terraform-aws-modules/eks/aws"
   version = "20.24.0"
@@ -88,22 +84,7 @@ module "eks" {
 
   create_cloudwatch_log_group = false
   authentication_mode         = "API_AND_CONFIG_MAP"
-
-  cluster_endpoint_public_access       = true
-  cluster_endpoint_public_access_cidrs = ["0.0.0.0/0"]
-
-  # THE UNICORN FIREWALL: Allow EVERYTHING from the Control Plane to the Nodes
-  # This ensures webhooks are never blocked by the AWS fabric.
-  node_security_group_additional_rules = {
-    ingress_cluster_all = {
-      description                   = "Allow all traffic from cluster control plane"
-      protocol                      = "-1"
-      from_port                     = 0
-      to_port                       = 0
-      type                          = "ingress"
-      source_cluster_security_group = true
-    }
-  }
+  cluster_endpoint_public_access = true
 
   eks_managed_node_groups = {
     brain = {
@@ -128,7 +109,6 @@ module "eks" {
   }
 }
 
-# --- 4. IAM FOR LBC ---
 resource "aws_iam_policy" "lb_controller" {
   name   = "AWSLoadBalancerControllerIAMPolicy-Hypernova"
   policy = data.http.lb_policy_json.response_body
