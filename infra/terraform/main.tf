@@ -132,21 +132,22 @@ resource "aws_iam_role_policy_attachment" "lb_controller_attach" {
 }
 
 # --- 5. SECURITY ---
-resource "aws_security_group_rule" "ray_dash" {
-  type              = "ingress"
-  from_port         = 8265
-  to_port           = 8265
-  protocol          = "tcp"
-  cidr_blocks       = ["0.0.0.0/0"]
-  security_group_id = module.eks.node_security_group_id
+# We use 'cluster_primary_security_group_id' AND the cluster security group
+resource "aws_security_group_rule" "lbc_webhook_inbound_primary" {
+  type                     = "ingress"
+  from_port                = 9443
+  to_port                  = 9443
+  protocol                 = "tcp"
+  source_security_group_id = module.eks.cluster_primary_security_group_id
+  security_group_id        = module.eks.node_security_group_id
 }
 
-resource "aws_security_group_rule" "lbc_webhook_inbound" {
-  type              = "ingress"
-  from_port         = 9443
-  to_port           = 9443
-  protocol          = "tcp"
-  source_security_group_id = module.eks.cluster_primary_security_group_id
+resource "aws_security_group_rule" "lbc_webhook_inbound_cluster" {
+  type                     = "ingress"
+  from_port                = 9443
+  to_port                  = 9443
+  protocol                 = "tcp"
+  source_security_group_id = module.eks.cluster_security_group_id
   security_group_id        = module.eks.node_security_group_id
 }
 
@@ -154,13 +155,12 @@ resource "aws_security_group_rule" "lbc_webhook_inbound" {
 # Cilium eBPF requires total transparency between nodes to manage the 
 # high-speed AI data plane and pod-to-pod encapsulation.
 resource "aws_security_group_rule" "node_to_node_all" {
-  description              = "Allow all node-to-node traffic for Cilium eBPF"
   type                     = "ingress"
   from_port                = 0
   to_port                  = 65535
-  protocol                 = "-1" # All protocols
-  security_group_id        = module.eks.node_security_group_id
+  protocol                 = "-1"
   source_security_group_id = module.eks.node_security_group_id
+  security_group_id        = module.eks.node_security_group_id
 }
 
 # Rule 4: NLB Health Checks (Internal VPC)
