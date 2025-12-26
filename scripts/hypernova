@@ -84,16 +84,27 @@ function ignite() {
       --set-string debug.verbose="" \
       --wait
 
-    log "💉 Injecting AWS Load Balancer Controller..."
-    # THE FIX
+   log "💉 Injecting AWS Load Balancer Controller..."
+    
+    # 1. Surgical Strike: Remove stale webhooks to prevent deadlock
+    kubectl delete mutatingwebhookconfiguration elbv2.k8s.aws-mutating-webhook-configuration --ignore-not-found
+    kubectl delete validatingwebhookconfiguration elbv2.k8s.aws-validating-webhook-configuration --ignore-not-found
+
+    # 2. Inject CRDs
     kubectl apply -f https://raw.githubusercontent.com/aws/eks-charts/master/stable/aws-load-balancer-controller/crds/crds.yaml
     
+    # 3. Install LBC
     helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system \
       --set clusterName="$NAME" --set serviceAccount.create=true \
       --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="$ROLE_ARN" \
       --set region="$REGION" --set vpcId="$VPC_ID" --wait
 
+    # 4. CRITICAL: Wait for LBC to be fully ready before proceeding
+    log "⏳ Waiting for LBC Webhook to become reachable..."
+    kubectl wait --for=condition=Available deployment/aws-load-balancer-controller -n kube-system --timeout=120s
+
     log "💉 Injecting Karpenter..."
+    # Now that LBC is ready, Karpenter won't hit a webhook timeout
     helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter --version 1.1.1 \
       --namespace karpenter --create-namespace \
       --set settings.clusterName="$NAME" --wait
