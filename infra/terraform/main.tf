@@ -13,6 +13,12 @@ terraform {
   }
 }
 
+variable "runner_arn" {
+  description = "The IAM ARN of the GitHub Actions runner"
+  type        = string
+  default     = "" # Fallback
+}
+
 provider "aws" { region = "us-east-1" }
 
 # --- 1. NETWORK (VPC) ---
@@ -112,8 +118,9 @@ module "eks" {
   }
 
   access_entries = {
-    admin = {
-      principal_arn = "arn:aws:iam::277047392590:root"
+    # This entry targets the EXACT identity of your GitHub Runner
+    github_runner = {
+      principal_arn     = var.runner_arn
       policy_associations = {
         admin = {
           policy_arn = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
