@@ -1,4 +1,4 @@
-# --- NEURAL HYPERNOVA: SOVEREIGN INFRASTRUCTURE V1.7.0 ---
+# --- NEURAL HYPERNOVA: SOVEREIGN INFRASTRUCTURE V1.8.0 ---
 
 terraform {
   required_version = ">= 1.5.0"
@@ -45,7 +45,39 @@ module "vpc" {
   }
 }
 
-# --- 2. THE SOVEREIGN BRAIN (EKS) ---
+# --- 2. DEDICATED FORGE SECURITY GROUP (The Isolation Fix) ---
+resource "aws_security_group" "forge_extra" {
+  name        = "hypernova-forge-extra-sg"
+  description = "Dedicated rules for Neural Hypernova to avoid EKS module collisions"
+  vpc_id      = module.vpc.vpc_id
+
+  # Rule: Internal VPC communication (eBPF & Webhooks)
+  ingress {
+    from_port   = 0
+    to_port     = 65535
+    protocol    = "-1"
+    cidr_blocks = [module.vpc.vpc_cidr_block]
+  }
+
+  # Rule: Ray Dashboard Public
+  ingress {
+    from_port   = 8265
+    to_port     = 8265
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = { Name = "hypernova-forge-extra-sg" }
+}
+
+# --- 3. EKS CLUSTER ---
 module "eks" {
   source  = "terraform-aws-modules/eks/aws"
   version = "20.24.0"
@@ -58,29 +90,8 @@ module "eks" {
   create_cloudwatch_log_group = false
   authentication_mode         = "API_AND_CONFIG_MAP"
 
-  # REQUIRED: Enable recommended rules so nodes can actually JOIN the cluster
+  # We let the module do its default thing, but we DON'T add rules to its SG
   node_security_group_enable_recommended_rules = true
-
-  # Custom Rules injected DIRECTLY into the module's managed SG
-  node_security_group_additional_rules = {
-    ingress_ray_dashboard = {
-      description = "Allow Ray Dashboard Public"
-      protocol    = "tcp"
-      from_port   = 8265
-      to_port     = 8265
-      type        = "ingress"
-      cidr_blocks = ["0.0.0.0/0"]
-    }
-    # Open internal ports for Cilium and NLB Health Checks within VPC
-    ingress_vpc_all = {
-      description = "Allow all VPC internal traffic"
-      protocol    = "-1"
-      from_port   = 0
-      to_port     = 65535
-      type        = "ingress"
-      cidr_blocks = ["10.0.0.0/16"]
-    }
-  }
 
   eks_managed_node_groups = {
     brain = {
@@ -88,6 +99,9 @@ module "eks" {
       ami_type       = "AL2023_x86_64_STANDARD"
       iam_role_name  = "KarpenterNodeRole-neural-hypernova"
       iam_role_use_name_prefix = false
+
+      # ATTACH OUR DEDICATED SG HERE
+      vpc_security_group_ids = [aws_security_group.forge_extra.id]
     }
   }
 
@@ -104,7 +118,7 @@ module "eks" {
   }
 }
 
-# --- 3. IAM RESOURCES (RAW) ---
+# --- 4. IAM FOR LBC ---
 resource "aws_iam_policy" "lb_controller" {
   name   = "AWSLoadBalancerControllerIAMPolicy-Hypernova"
   policy = data.http.lb_policy_json.response_body
@@ -128,7 +142,6 @@ resource "aws_iam_role_policy_attachment" "lb_controller_attach" {
   policy_arn = aws_iam_policy.lb_controller.arn
 }
 
-# --- 4. OUTPUTS ---
 output "cluster_name" { value = module.eks.cluster_name }
 output "region"       { value = "us-east-1" }
 output "vpc_id"       { value = module.vpc.vpc_id }
