@@ -70,31 +70,38 @@ function ignite() {
     log "⏳ Phase 2: Waiting for RBAC Propagation..."
     sleep 15 # Short pause for Access Entries to settle
 
-    # --- CORE LAYERS ---
     log "🛠️ Registering Operational Repositories..."
     helm repo add cilium https://helm.cilium.io/
     helm repo add eks https://aws.github.io/eks-charts
     helm repo add ray-project https://ray-project.github.io/kuberay-helm/
     helm repo update
 
-    log "💉 Injecting Cilium eBPF (Schema-Compliant)..."
+    log "💉 Injecting Cilium eBPF..."
+    # The 'set-string' fix is applied here
     helm upgrade --install cilium cilium/cilium --version 1.16.5 \
       --namespace kube-system \
       --set kubeProxyReplacement=true \
-      --set debug.enabled=false \
-      --set debug.verbose=null \
       --set operator.replicas=1 \
+      --set-string debug.verbose="" \
       --wait
 
-    log "💉 Injecting AWS LBC & Tools..."
+    log "💉 Injecting AWS Load Balancer Controller..."
     kubectl apply -k "github.com/aws/eks-charts/stable/aws-load-balancer-controller/crds?ref=master"
-    helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system \
-      --set clusterName="$NAME" --set serviceAccount.create=true \
+    helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
+      --namespace kube-system \
+      --set clusterName="$NAME" \
+      --set serviceAccount.create=true \
       --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="$ROLE_ARN" \
-      --set region=us-east-1 --set vpcId="$VPC_ID" --wait
+      --set region=us-east-1 \
+      --set vpcId="$VPC_ID" \
+      --wait
 
-    log "💉 Injecting Karpenter & KubeRay..."
-    helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter --version 1.1.1 -n karpenter --create-namespace --set settings.clusterName="$NAME" --wait
+    log "💉 Injecting Karpenter..."
+    helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter --version 1.1.1 \
+      --namespace karpenter --create-namespace \
+      --set settings.clusterName="$NAME" --wait
+
+    log "💉 Injecting KubeRay..."
     helm upgrade --install kuberay-operator ray-project/kuberay-operator --version 1.2.2 --wait
 
     log "🏗️ Final Manifest Application..."
