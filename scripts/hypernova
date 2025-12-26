@@ -83,7 +83,36 @@ function ignite() {
     log "✅ NEURAL HYPERNOVA IS LIVE."
 }
 
-# (Keep nuke/demo as they were)
+function nuke() {
+    bootstrap
+    log "☢️ SCORCHED EARTH PROTOCOL: TOTAL ERASURE"
+    cd "$TF_DIR"
+    rm -rf .terraform .terraform.lock.hcl
+    terraform init "${INIT_OPTS[@]}" -reconfigure || true
+    
+    VPC_ID=$(terraform output -raw vpc_id 2>/dev/null || aws ec2 describe-vpcs --filters "Name=tag:Name,Values=hypernova-vpc" --query "Vpcs[0].VpcId" --output text || echo "")
+    REGION="us-east-1"
+    CLUSTER_NAME="neural-hypernova"
+
+    log "1. Dismantling Kubernetes..."
+    kubectl delete svc hypernova-dashboard-lb --ignore-not-found --timeout=20s || true
+    aws eks delete-cluster --name "$CLUSTER_NAME" --region "$REGION" 2>/dev/null || true
+
+    log "2. Force-Releasing Elastic IPs..."
+    EIPS=$(aws ec2 describe-addresses --region $REGION --query "Addresses[?VpcId=='$VPC_ID'].AllocationId" --output text)
+    for eip in $EIPS; do aws ec2 release-address --allocation-id "$eip" --region $REGION || true; done
+
+    log "3. Infrastructure Destruction..."
+    terraform destroy "${APPLY_OPTS[@]}" || true
+    
+    if [ ! -z "$VPC_ID" ] && [ "$VPC_ID" != "null" ]; then
+        log "4. Deep Sweep of orphaned ENIs..."
+        ENIS=$(aws ec2 describe-network-interfaces --filters "Name=vpc-id,Values=$VPC_ID" --query "NetworkInterfaces[*].NetworkInterfaceId" --output text)
+        for eni in $ENIS; do aws ec2 delete-network-interface --network-interface-id "$eni" || true; done
+    fi
+    log "🌑 ZERO TRACE."
+}
+
 case "$1" in
     ignite) ignite ;;
     nuke) nuke ;;
