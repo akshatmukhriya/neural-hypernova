@@ -1,4 +1,4 @@
-# --- NEURAL HYPERNOVA: ARCHITECTURAL DNA V1.2.0 ---
+# --- NEURAL HYPERNOVA: SOVEREIGN ARCHITECTURE V1.3.0 ---
 
 terraform {
   required_version = ">= 1.5.0"
@@ -7,24 +7,19 @@ terraform {
     http = { source = "hashicorp/http", version = "~> 3.0" }
   }
   backend "s3" {
-    # Bucket name injected dynamically by Jockey
     key    = "eks/terraform.tfstate"
     region = "us-east-1"
   }
 }
 
-variable "runner_arn" {
-  description = "The IAM ARN of the GitHub Actions runner"
-  type        = string
-  default     = "" # Fallback
-}
-
 provider "aws" { region = "us-east-1" }
 
-# --- 1. NETWORK (VPC) ---
+variable "runner_arn" { type = string }
+
+# --- VPC ---
 module "vpc" {
   source  = "terraform-aws-modules/vpc/aws"
-  version = "~> 5.0"
+  version = "5.2.0"
   name    = "hypernova-vpc"
   cidr    = "10.0.0.0/16"
   azs     = ["us-east-1a", "us-east-1b", "us-east-1c"]
@@ -35,78 +30,23 @@ module "vpc" {
   enable_nat_gateway = true
   single_nat_gateway = true 
 
-  public_subnet_tags = { "kubernetes.io/role/elb" = 1 }
-  private_subnet_tags = { 
-    "kubernetes.io/role/internal-elb" = 1
-    "karpenter.sh/discovery"          = "neural-hypernova" 
-  }
+  public_subnet_tags  = { "kubernetes.io/role/elb" = 1 }
+  private_subnet_tags = { "kubernetes.io/role/internal-elb" = 1, "karpenter.sh/discovery" = "neural-hypernova" }
 }
 
-# --- 2. SECURITY (FIREWALLS) ---
-resource "aws_security_group_rule" "ray_dashboard" {
-  type              = "ingress"
-  from_port         = 8265
-  to_port           = 8265
-  protocol          = "tcp"
-  cidr_blocks       = ["0.0.0.0/0"]
-  security_group_id = module.eks.node_security_group_id
-}
-
-resource "aws_security_group_rule" "nlb_health" {
-  type              = "ingress"
-  from_port         = 0
-  to_port           = 65535
-  protocol          = "tcp"
-  cidr_blocks       = [module.vpc.vpc_cidr_block]
-  security_group_id = module.eks.node_security_group_id
-}
-
-# --- 3. IDENTITY (IAM) ---
-data "http" "lb_policy" {
-  url = "https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/main/docs/install/iam_policy.json"
-}
-
-resource "aws_iam_policy" "lb_controller" {
-  name   = "AWSLoadBalancerControllerIAMPolicy"
-  policy = data.http.lb_policy.response_body
-}
-
-module "lb_role" {
-  source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
-  version = "5.33.0"
-  role_name = "lb-controller-role-hypernova"
-  role_policy_arns = { policy = aws_iam_policy.lb_controller.arn }
-  oidc_providers = {
-    main = {
-      provider_arn               = module.eks.oidc_provider_arn
-      namespace_service_accounts = ["kube-system:aws-load-balancer-controller"]
-    }
-  }
-}
-
-# --- 4. THE BRAIN (EKS) ---
+# --- EKS 1.31 ---
 module "eks" {
   source  = "terraform-aws-modules/eks/aws"
-  version = "~> 20.0"
+  version = "20.24.0"
 
   cluster_name    = "neural-hypernova"
   cluster_version = "1.31"
 
-  # --- THE VISIBILITY FIX ---
-  cluster_endpoint_public_access  = true
-  cluster_endpoint_private_access = true # Allow internal inter-node talk
-  
-  # Ensure the runner can always see the cluster
-  cluster_endpoint_public_access_cidrs = ["0.0.0.0/0"] 
-
-  # No logs, no KMS collisions
-  create_cloudwatch_log_group = false
-  cluster_enabled_log_types   = []
-  create_kms_key              = false
-  cluster_encryption_config   = {} 
-
   vpc_id     = module.vpc.vpc_id
   subnet_ids = module.vpc.private_subnets
+
+  create_cloudwatch_log_group = false
+  authentication_mode         = "API_AND_CONFIG_MAP"
 
   eks_managed_node_groups = {
     brain = {
@@ -118,9 +58,8 @@ module "eks" {
   }
 
   access_entries = {
-    # This entry targets the EXACT identity of your GitHub Runner
     github_runner = {
-      principal_arn     = var.runner_arn
+      principal_arn = var.runner_arn
       policy_associations = {
         admin = {
           policy_arn = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
@@ -131,8 +70,20 @@ module "eks" {
   }
 }
 
-# --- OUTPUTS (FOR JOCKEY) ---
+# --- IAM FOR LBC ---
+data "http" "lb_policy" { url = "https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/main/docs/install/iam_policy.json" }
+resource "aws_iam_policy" "lb_controller" { name = "AWSLoadBalancerControllerIAMPolicy"; policy = data.http.lb_policy.response_body }
+
+module "lb_role" {
+  source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
+  role_name = "lb-controller-role-hypernova"
+  role_policy_arns = { policy = aws_iam_policy.lb_controller.arn }
+  oidc_providers = { main = { provider_arn = module.eks.oidc_provider_arn, namespace_service_accounts = ["kube-system:aws-load-balancer-controller"] } }
+}
+
+# --- OUTPUTS ---
 output "cluster_name" { value = module.eks.cluster_name }
 output "region" { value = "us-east-1" }
 output "vpc_id" { value = module.vpc.vpc_id }
 output "lb_role_arn" { value = module.lb_role.iam_role_arn }
+output "vpc_cidr" { value = module.vpc.vpc_cidr_block }
