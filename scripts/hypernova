@@ -32,8 +32,9 @@ function bootstrap() {
 
 function ignite() {
     bootstrap
-    log "🚀 Ignite Sequence: V1.8.0 (Security Isolation)"
+    log "🚀 Ignite Sequence: Neural Hypernova V1.8.1"
     cd "$TF_DIR"
+    
     rm -rf .terraform .terraform.lock.hcl
     terraform init "${INIT_OPTS[@]}" -reconfigure
     terraform apply "${APPLY_OPTS[@]}"
@@ -42,8 +43,29 @@ function ignite() {
     VPC_ID=$(terraform output -raw vpc_id)
     ROLE_ARN=$(terraform output -raw lb_role_arn)
 
+    log "📡 Synchronizing Kubeconfig..."
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
 
+    # --- THE FIX: PUBLIC CONNECTIVITY GUARD ---
+    log "⏳ Waiting for Public API Endpoint to go live (DNS Propagation)..."
+    local ATTEMPTS=0
+    local MAX_ATTEMPTS=20
+    # We loop until 'kubectl version' hits the Public IP and returns a result
+    until kubectl version --client=false --request-timeout='5s' > /dev/null 2>&1 || [ $ATTEMPTS -eq $MAX_ATTEMPTS ]; do
+        log "API still resolving to Internal IP or unreachable... (Attempt $((ATTEMPTS+1))/$MAX_ATTEMPTS)"
+        # Re-syncing kubeconfig helps refresh the DNS cache in the runner
+        aws eks update-kubeconfig --region us-east-1 --name "$NAME" > /dev/null
+        sleep 20
+        ATTEMPTS=$((ATTEMPTS+1))
+    done
+
+    if [ $ATTEMPTS -eq $MAX_ATTEMPTS ]; then
+        error_log "❌ Public API Connectivity Failed. DNS did not propagate."
+        exit 1
+    fi
+    log "✅ Public API Handshake Verified."
+
+    # --- PROCEED WITH HELM ---
     log "🛠️ Registering Global Repos..."
     helm repo add cilium https://helm.cilium.io/
     helm repo add eks https://aws.github.io/eks-charts
@@ -54,7 +76,7 @@ function ignite() {
     helm upgrade --install cilium cilium/cilium --version 1.16.5 -n kube-system \
       --set kubeProxyReplacement=true --set debug.verbose="" --wait
 
-    log "💉 Injecting AWS LBC (FailurePolicy: Ignore)..."
+    log "💉 Injecting AWS Load Balancer Controller..."
     kubectl delete mutatingwebhookconfiguration elbv2.k8s.aws-mutating-webhook-configuration --ignore-not-found
     kubectl apply -f https://raw.githubusercontent.com/aws/eks-charts/master/stable/aws-load-balancer-controller/crds/crds.yaml
     helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system \
@@ -73,6 +95,7 @@ function ignite() {
     log "🏗️ Applying Forge Manifests..."
     kubectl apply -f "$K8S_DIR/core/karpenter-gpu-pool.yaml"
     kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"
+    
     log "✅ NEURAL HYPERNOVA IS LIVE."
 }
 
