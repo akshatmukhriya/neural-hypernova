@@ -5,7 +5,6 @@ set -e
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 TF_DIR="$ROOT_DIR/infra/terraform"
 K8S_DIR="$ROOT_DIR/k8s"
-
 COLOR_CYAN='\033[0;36m'
 COLOR_GREEN='\033[0;32m'
 COLOR_RESET='\033[0m'
@@ -13,7 +12,7 @@ COLOR_RESET='\033[0m'
 function log() { echo -e "${COLOR_CYAN}[HYPERNOVA-LOG] $(date +'%H:%M:%S') | $1${COLOR_RESET}"; }
 
 function bootstrap() {
-    log "📡 Detecting Cloud Context..."
+    log "📡 Detecting Identity..."
     RUNNER_ARN=$(aws sts get-caller-identity --query Arn --output text)
     ACCOUNT_ID=$(echo $RUNNER_ARN | cut -d: -f5)
     
@@ -33,7 +32,7 @@ function bootstrap() {
 
 function ignite() {
     bootstrap
-    log "🚀 Ignite Sequence: Neural Hypernova V1.6.0"
+    log "🚀 Ignite Sequence: V1.7.0 (Unified Consolidation)"
     cd "$TF_DIR"
     
     rm -rf .terraform .terraform.lock.hcl
@@ -46,7 +45,7 @@ function ignite() {
 
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
 
-    log "🛠️ Registering Global Repos..."
+    log "🛠️ Registering Repos..."
     helm repo add cilium https://helm.cilium.io/
     helm repo add eks https://aws.github.io/eks-charts
     helm repo add ray-project https://ray-project.github.io/kuberay-helm/
@@ -56,9 +55,10 @@ function ignite() {
     helm upgrade --install cilium cilium/cilium --version 1.16.5 -n kube-system \
       --set kubeProxyReplacement=true --set debug.verbose="" --wait
 
-    log "💉 Injecting AWS LBC (FailurePolicy: Ignore)..."
+    log "💉 Injecting AWS Load Balancer Controller..."
     kubectl delete mutatingwebhookconfiguration elbv2.k8s.aws-mutating-webhook-configuration --ignore-not-found
     kubectl apply -f https://raw.githubusercontent.com/aws/eks-charts/master/stable/aws-load-balancer-controller/crds/crds.yaml
+    
     helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system \
       --set clusterName="$NAME" --set serviceAccount.create=true \
       --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="$ROLE_ARN" \
@@ -75,12 +75,13 @@ function ignite() {
     log "🏗️ Applying Forge Manifests..."
     kubectl apply -f "$K8S_DIR/core/karpenter-gpu-pool.yaml"
     kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"
+    
     log "✅ NEURAL HYPERNOVA IS LIVE."
 }
 
 function nuke() {
     bootstrap
-    log "☢️ SCORCHED EARTH PROTOCOL..."
+    log "☢️ STARTING SOVEREIGN ERASURE..."
     cd "$TF_DIR"
     rm -rf .terraform .terraform.lock.hcl
     terraform init "${INIT_OPTS[@]}" -reconfigure || true
@@ -88,55 +89,27 @@ function nuke() {
     VPC_ID=$(terraform output -raw vpc_id 2>/dev/null || echo "")
     REGION="us-east-1"
 
-    log "1. Cleanup Kubernetes..."
+    log "1. Clearing Kubernetes dependencies..."
     kubectl delete svc hypernova-dashboard-lb --ignore-not-found --timeout=20s || true
     
-    log "2. Release Public Mappings..."
+    log "2. Force-Clearing LoadBalancers and Target Groups..."
+    LBS=$(aws elbv2 describe-load-balancers --region $REGION --query "LoadBalancers[?VpcId=='$VPC_ID'].LoadBalancerArn" --output text)
+    for lb in $LBS; do aws elbv2 delete-load-balancer --load-balancer-arn "$lb" --region $REGION || true; done
+    
+    log "3. Releasing Elastic IPs..."
     EIPS=$(aws ec2 describe-addresses --region $REGION --query "Addresses[?VpcId=='$VPC_ID'].AllocationId" --output text)
     for eip in $EIPS; do aws ec2 release-address --allocation-id "$eip" --region $REGION || true; done
 
-    log "3. Destruction..."
+    log "4. Infrastructure Destruction..."
     terraform destroy "${APPLY_OPTS[@]}" || true
     
+    log "5. Final DeepSweep..."
     if [ ! -z "$VPC_ID" ] && [ "$VPC_ID" != "null" ]; then
-        log "4. Deep Sweep..."
         ENIS=$(aws ec2 describe-network-interfaces --filters "Name=vpc-id,Values=$VPC_ID" --query "NetworkInterfaces[*].NetworkInterfaceId" --output text)
         for eni in $ENIS; do aws ec2 delete-network-interface --network-interface-id "$eni" || true; done
         aws eks delete-cluster --name neural-hypernova --region $REGION || true
     fi
     log "🌑 ZERO TRACE."
-}
-
-function demo() {
-    bootstrap
-    log "🎭 Launching Spectator..."
-    cd "$TF_DIR"
-    terraform init "${INIT_OPTS[@]}" -reconfigure > /dev/null
-    NAME=$(terraform output -raw cluster_name)
-    aws eks update-kubeconfig --region us-east-1 --name "$NAME"
-
-    kubectl apply -f - <<EOF
-apiVersion: v1
-kind: Service
-metadata:
-  name: hypernova-dashboard-lb
-  annotations:
-    service.beta.kubernetes.io/aws-load-balancer-type: external
-    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: instance
-    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
-spec:
-  type: LoadBalancer
-  selector: { ray.io/node-type: head }
-  ports: [{ name: dash, port: 8265, targetPort: 8265 }]
-EOF
-
-    log "Waiting for DNS..."
-    URL=""
-    while [ -z "$URL" ]; do
-        URL=$(kubectl get svc hypernova-dashboard-lb -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
-        [ -z "$URL" ] && sleep 10
-    done
-    log "🚀 DASHBOARD: http://$URL:8265"
 }
 
 case "$1" in
