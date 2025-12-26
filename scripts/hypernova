@@ -32,60 +32,85 @@ function bootstrap() {
 # --- THE IGNITE ---
 function ignite() {
     bootstrap
-    log "🚀 Ignite Sequence: Neural Hypernova V1.2.1"
+    log "🚀 Ignite Sequence: Neural Hypernova V1.2.2"
     cd "$TF_DIR"
     
-    # 1. Force Clean Local Context
     rm -rf .terraform .terraform.lock.hcl
     [ -f "backend.tf" ] && rm -f "backend.tf"
     [ -f "outputs.tf" ] && rm -f "outputs.tf"
 
-    log "Initializing Terraform with Persistent State..."
+    log "Initializing Terraform..."
     terraform init "${INIT_OPTS[@]}" -reconfigure
-
-    # --- THE GHOST HUNTER (The Unicorn Fix) ---
-    log "🔎 Checking for Ghost Infrastructure..."
-    if aws eks describe-cluster --name neural-hypernova --region us-east-1 > /dev/null 2>&1; then
-        log "⚠️ Ghost Cluster Detected! Syncing State..."
-        # We attempt to import the cluster into the state so Terraform 'owns' it again
-        # This prevents the 'AlreadyExists' error
-        terraform import "${INIT_OPTS[@]}" module.eks.aws_eks_cluster.this[0] neural-hypernova || log "Import skipped or failed, proceeding to apply..."
-    fi
-
-    log "Executing Infrastructure Synthesis..."
     terraform apply -auto-approve
 
-    # 2. Extract & Warm up
     NAME=$(terraform output -raw cluster_name)
     REGION=$(terraform output -raw region)
+    
+    log "Synchronizing Kubeconfig for $NAME..."
     aws eks update-kubeconfig --region "$REGION" --name "$NAME"
 
-    log "⏳ Waiting for EKS Public API to warm up..."
-    sleep 30 
+    # --- THE AUTHENTICATION WARM-UP (The Unicorn Fix) ---
+    log "⏳ Warming up IAM-to-RBAC Mapping (EKS 1.31 Access Entries)..."
+    local ATTEMPTS=0
+    local MAX_ATTEMPTS=20
+    # We wait until 'kubectl get nodes' returns 200 OK
+    until kubectl get nodes --request-timeout='5s' > /dev/null 2>&1 || [ $ATTEMPTS -eq $MAX_ATTEMPTS ]; do
+        log "RBAC not yet propagated (401 Unauthorized)... (Attempt $((ATTEMPTS+1))/$MAX_ATTEMPTS)"
+        sleep 15
+        ATTEMPTS=$((ATTEMPTS+1))
+        # Re-syncing kubeconfig can sometimes kick the local provider
+        aws eks update-kubeconfig --region "$REGION" --name "$NAME" > /dev/null
+    done
 
-    # Operational Layers...
+    if [ $ATTEMPTS -eq $MAX_ATTEMPTS ]; then
+        error_log "❌ EKS Authentication failed to propagate. Check IAM Access Entries."
+        exit 1
+    fi
+    log "✅ Authentication Verified. Identity mapped to ClusterAdmin."
+
+    # --- CORE LAYERS ---
+    log "Registering Operational Repos..."
     helm repo add cilium https://helm.cilium.io/
     helm repo add eks https://aws.github.io/eks-charts
     helm repo add ray-project https://ray-project.github.io/kuberay-helm/
     helm repo update
 
     log "Injecting Core Infrastructure Layers..."
-    helm upgrade --install cilium cilium/cilium --version 1.16.5 -n kube-system --set kubeProxyReplacement=true --wait
+    
+    # We use a wrapper to handle Helm 401s during initial propagation
+    function safe_helm() {
+        local count=0
+        until "$@" || [ $count -eq 5 ]; do
+            log "Helm hit an auth bump, retrying in 10s..."
+            sleep 10
+            count=$((count+1))
+        done
+    }
+
+    log "Injecting Cilium eBPF..."
+    safe_helm helm upgrade --install cilium cilium/cilium --version 1.16.5 -n kube-system --set kubeProxyReplacement=true --wait
     
     ROLE_ARN=$(terraform output -raw lb_role_arn)
     VPC_ID=$(terraform output -raw vpc_id)
+    
+    log "Injecting AWS Load Balancer Controller..."
     kubectl apply -k "github.com/aws/eks-charts/stable/aws-load-balancer-controller/crds?ref=master"
-    helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system \
+    safe_helm helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system \
       --set clusterName="$NAME" --set serviceAccount.create=true \
       --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="$ROLE_ARN" \
-      --set region=us-east-1 --set vpcId="$VPC_ID" --wait
+      --set region="$REGION" --set vpcId="$VPC_ID" --wait
 
-    helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter --version 1.1.1 -n karpenter --create-namespace --set settings.clusterName="$NAME" --wait
-    helm upgrade --install kuberay-operator ray-project/kuberay-operator --version 1.2.2 -n default
+    log "Injecting Karpenter..."
+    safe_helm helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter --version 1.1.1 -n karpenter --create-namespace --set settings.clusterName="$NAME" --wait
     
+    log "Injecting KubeRay..."
+    safe_helm helm upgrade --install kuberay-operator ray-project/kuberay-operator --version 1.2.2
+
+    log "Applying Forge Workloads..."
     kubectl apply -f "$K8S_DIR/core/karpenter-gpu-pool.yaml"
     kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"
-    log "✅ FORGE ONLINE."
+    
+    log "✅ NEURAL HYPERNOVA IS ARMED."
 }
 
 # --- THE NUKE ---
