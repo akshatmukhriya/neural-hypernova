@@ -1,4 +1,4 @@
-# --- NEURAL HYPERNOVA: SOVEREIGN INFRASTRUCTURE V1.8.0 ---
+# --- NEURAL HYPERNOVA: SOVEREIGN INFRASTRUCTURE V1.9.0 ---
 
 terraform {
   required_version = ">= 1.5.0"
@@ -45,21 +45,19 @@ module "vpc" {
   }
 }
 
-# --- 2. DEDICATED FORGE SECURITY GROUP (The Isolation Fix) ---
+# --- 2. DEDICATED FORGE SECURITY GROUP ---
 resource "aws_security_group" "forge_extra" {
   name        = "hypernova-forge-extra-sg"
-  description = "Dedicated rules for Neural Hypernova to avoid EKS module collisions"
+  description = "Custom rules to avoid EKS module collisions"
   vpc_id      = module.vpc.vpc_id
 
-  # Rule: Internal VPC communication (eBPF & Webhooks)
   ingress {
     from_port   = 0
-    to_port     = 0     # Fixed: Must be 0 for protocol -1
+    to_port     = 0
     protocol    = "-1"
     cidr_blocks = [module.vpc.vpc_cidr_block]
   }
 
-  # Rule: Ray Dashboard Public
   ingress {
     from_port   = 8265
     to_port     = 8265
@@ -90,7 +88,22 @@ module "eks" {
   create_cloudwatch_log_group = false
   authentication_mode         = "API_AND_CONFIG_MAP"
 
-  # We let the module do its default thing, but we DON'T add rules to its SG
+  # VISIBILITY FIX: Allow public access and specify CIDRs
+  cluster_endpoint_public_access       = true
+  cluster_endpoint_public_access_cidrs = ["0.0.0.0/0"]
+
+  # FIREWALL FIX: Explicitly allow HTTPS (443) to the Control Plane from the Internet
+  cluster_security_group_additional_rules = {
+    ingress_public_443 = {
+      description = "Allow HTTPS from Internet to API Server"
+      protocol    = "tcp"
+      from_port   = 443
+      to_port     = 443
+      type        = "ingress"
+      cidr_blocks = ["0.0.0.0/0"]
+    }
+  }
+
   node_security_group_enable_recommended_rules = true
 
   eks_managed_node_groups = {
@@ -99,9 +112,7 @@ module "eks" {
       ami_type       = "AL2023_x86_64_STANDARD"
       iam_role_name  = "KarpenterNodeRole-neural-hypernova"
       iam_role_use_name_prefix = false
-
-      # ATTACH OUR DEDICATED SG HERE
-      vpc_security_group_ids = [aws_security_group.forge_extra.id]
+      vpc_security_group_ids   = [aws_security_group.forge_extra.id]
     }
   }
 
