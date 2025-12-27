@@ -37,6 +37,10 @@ module "vpc" {
 
   enable_nat_gateway = true
   single_nat_gateway = true 
+
+  private_subnet_tags = {
+    "karpenter.sh/discovery" = "hypernova-${random_string.id.result}"
+  } 
 }
 
 # --- 2. THE BRAIN (EKS 1.31) ---
@@ -48,6 +52,10 @@ module "eks" {
   cluster_version = "1.31"
   vpc_id          = module.vpc.vpc_id
   subnet_ids      = module.vpc.private_subnets
+
+  node_security_group_tags = {
+    "karpenter.sh/discovery" = "hypernova-${random_string.id.result}"
+  }
 
   # --- BYPASSING MODULE BUGS ---
   # DO NOT add KMS or Encryption blocks here.
@@ -105,6 +113,31 @@ module "karpenter_controller_role" {
       namespace_service_accounts = ["karpenter:karpenter"]
     }
   }
+}
+
+resource "aws_iam_role_policy" "karpenter_describe_cluster" {
+  name = "karpenter-describe-cluster"
+  role = module.karpenter_role.iam_role_name # Ensure this matches your module name
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = [
+          "eks:DescribeCluster",
+          "ec2:DescribeSubnets",
+          "ec2:DescribeSecurityGroups",
+          "ec2:DescribeInstances",
+          "ec2:DescribeInstanceTypes",
+          "ec2:DescribeInstanceTypeOfferings",
+          "ec2:DescribeAvailabilityZones",
+          "ssm:GetParameter"
+        ]
+        Effect   = "Allow"
+        Resource = "*"
+      }
+    ]
+  })
 }
 
 # --- 4. OUTPUTS ---
