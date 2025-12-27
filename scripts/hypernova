@@ -5,6 +5,7 @@ set -e
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 TF_DIR="$ROOT_DIR/infra/terraform"
 K8S_DIR="$ROOT_DIR/k8s"
+
 COLOR_CYAN='\033[0;36m'
 COLOR_GREEN='\033[0;32m'
 COLOR_RESET='\033[0m'
@@ -12,10 +13,10 @@ COLOR_RESET='\033[0m'
 function log() { echo -e "${COLOR_CYAN}[HYPERNOVA] $1${COLOR_RESET}"; }
 
 function bootstrap() {
-    log "📡 Detecting Cloud Identity..."
+    log "📡 Detecting Identity..."
     RUNNER_ARN=$(aws sts get-caller-identity --query Arn --output text)
     ACCOUNT_ID=$(echo $RUNNER_ARN | cut -d: -f5)
-    [[ $RUNNER_ARN == *"assumed-role"* ]] && CLEAN_ARN="arn:aws:iam::$ACCOUNT_ID:role/$(echo $RUNNER_ARN | cut -d/ -f2)" || CLEAN_ARN=$RUNNER_ARN
+    
     BUCKET="hypernova-state-$ACCOUNT_ID"
     aws s3 mb "s3://$BUCKET" --region us-east-1 2>/dev/null || true
     INIT_OPTS=(-backend-config="bucket=$BUCKET")
@@ -23,12 +24,18 @@ function bootstrap() {
 
 function ignite() {
     bootstrap
-    log "🚀 Ignite Sequence: V37.0.0"
+    log "🚀 Ignite Sequence: V38.0.0"
+    
+    log "🧹 Clearing account IP debris..."
+    for eip in $(aws ec2 describe-addresses --query "Addresses[?AssociationId==null].AllocationId" --output text); do
+      aws ec2 release-address --allocation-id $eip || true
+    done
+
     cd "$TF_DIR"
     rm -rf .terraform .terraform.lock.hcl
     terraform init "${INIT_OPTS[@]}" -reconfigure
-    terraform apply "${APPLY_OPTS[@]}"
-    
+    terraform apply -auto-approve
+
     NAME=$(terraform output -raw cluster_name)
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
 
@@ -41,7 +48,7 @@ function ignite() {
     helm upgrade --install cilium cilium/cilium --version 1.16.5 -n kube-system \
       --set kubeProxyReplacement=true --set-string debug.verbose="" --wait=false
 
-    log "💉 Phase 2: Karpenter (Sovereign IRSA)..."
+    log "💉 Phase 2: Karpenter..."
     CONTROLLER_ROLE=$(terraform output -raw karpenter_controller_role)
     helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter --version 1.1.1 \
       -n karpenter --create-namespace \
@@ -52,11 +59,9 @@ function ignite() {
     helm upgrade --install kuberay kuberay/kuberay-operator --version 1.2.2 --wait=false
 
     log "🏗️ Injecting Hardware IDs into NodePool..."
-    # Extract Real IDs for surgical precision
     SUBNET_IDS=$(terraform output -json private_subnet_ids | jq -r '. | join(",")')
     SG_ID=$(terraform output -raw node_security_group_id)
     
-    # Create the final manifest with real IDs
     sed "s/SUBNET_IDS_PLACEHOLDER/$SUBNET_IDS/g" "$K8S_DIR/core/karpenter-gpu-pool.yaml" | \
     sed "s/SG_ID_PLACEHOLDER/$SG_ID/g" > "$K8S_DIR/core/active-pool.yaml"
 
@@ -67,16 +72,17 @@ function ignite() {
 
 function demo() {
     bootstrap
-    log "🎭 Launching Spectator Protocol..."
+    log "🎭 Launching Spectator Protocol (Cloud-Native Bypass)..."
     cd "$TF_DIR"
     terraform init "${INIT_OPTS[@]}" -reconfigure > /dev/null
+    
     NAME=$(terraform output -raw cluster_name)
     VPC_ID=$(terraform output -raw vpc_id)
     RAND_ID=$(terraform output -raw random_id)
     SUBNETS=$(terraform output -json public_subnets | jq -r '.[]' | paste -sd " " -)
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
 
-    log "🌐 Ensuring Dashboard NodePort..."
+    log "🌐 Step 1: Deploying Dashboard NodePort..."
     cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: Service
@@ -94,10 +100,11 @@ EOF
         sleep 15
     done
 
-    log "🌐 Phase 1: Building Hardware NLB..."
+    log "🌐 Step 2: Building Hardware NLB..."
     LB_NAME="hyp-lb-$RAND_ID"
     LB_ARN=$(aws elbv2 create-load-balancer --name "$LB_NAME" --subnets $SUBNETS --type network --query "LoadBalancers[0].LoadBalancerArn" --output text)
     TG_ARN=$(aws elbv2 create-target-group --name "hyp-tg-$RAND_ID" --protocol TCP --port 30265 --vpc-id "$VPC_ID" --target-type instance --query "TargetGroups[0].TargetGroupArn" --output text)
+    
     INSTANCES=$(aws ec2 describe-instances --filters "Name=tag:kubernetes.io/cluster/$NAME,Values=owned" "Name=instance-state-name,Values=running" --query "Reservations[*].Instances[*].InstanceId" --output text)
     for ins in $INSTANCES; do aws elbv2 register-targets --target-group-arn "$TG_ARN" --targets Id="$ins" || true; done
     aws elbv2 create-listener --load-balancer-arn "$LB_ARN" --protocol TCP --port 8265 --default-actions Type=forward,TargetGroupArn="$TG_ARN" > /dev/null
@@ -112,12 +119,16 @@ function nuke() {
     cd "$TF_DIR"
     rm -rf .terraform .terraform.lock.hcl
     terraform init "${INIT_OPTS[@]}" -reconfigure || true
+    
     VPC_ID=$(terraform output -raw vpc_id 2>/dev/null || echo "")
+    RAND_ID=$(terraform output -raw random_id 2>/dev/null || echo "final")
     NAME=$(terraform output -raw cluster_name 2>/dev/null || echo "hypernova")
 
+    log "1. Purging Hardware..."
     LB_ARNS=$(aws elbv2 describe-load-balancers --query "LoadBalancers[?contains(LoadBalancerName, 'hyp-lb')].LoadBalancerArn" --output text)
     for lb in $LB_ARNS; do aws elbv2 delete-load-balancer --load-balancer-arn "$lb" || true; done
 
+    log "2. Erasing Cluster..."
     aws eks delete-cluster --name "$NAME" --region us-east-1 2>/dev/null || true
     for eip in $(aws ec2 describe-addresses --region us-east-1 --query "Addresses[?VpcId=='$VPC_ID'].AllocationId" --output text); do
       aws ec2 release-address --allocation-id "$eip" --region us-east-1 || true
