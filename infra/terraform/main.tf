@@ -1,4 +1,4 @@
-# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V10.0.0 ---
+# --- NEURAL HYPERNOVA: ATOMIC INFRASTRUCTURE V11.0.0 ---
 
 terraform {
   required_version = ">= 1.5.0"
@@ -19,12 +19,14 @@ variable "runner_arn" {
   default = ""
 }
 
+# --- 1. DATA SOURCES ---
 data "aws_caller_identity" "current" {}
+data "aws_partition" "current" {}
 data "http" "lb_policy" {
   url = "https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/main/docs/install/iam_policy.json"
 }
 
-# --- 1. NETWORK ---
+# --- 2. NETWORK ---
 module "vpc" {
   source  = "terraform-aws-modules/vpc/aws"
   version = "5.2.0"
@@ -45,7 +47,7 @@ module "vpc" {
   }
 }
 
-# --- 2. THE BRAIN (EKS 1.31) ---
+# --- 3. THE BRAIN (EKS) ---
 module "eks" {
   source  = "terraform-aws-modules/eks/aws"
   version = "20.24.0"
@@ -63,7 +65,7 @@ module "eks" {
 
   node_security_group_enable_recommended_rules = true
   node_security_group_additional_rules = {
-    ingress_vpc_all = {
+    ingress_all_vpc = {
       description = "Internal VPC access"
       protocol    = "-1"
       from_port   = 0
@@ -71,29 +73,19 @@ module "eks" {
       type        = "ingress"
       cidr_blocks = ["10.0.0.0/16"]
     }
-    ingress_ray = {
-      description = "Ray Dashboard"
-      protocol    = "tcp"
-      from_port   = 8265
-      to_port     = 8265
-      type        = "ingress"
-      cidr_blocks = ["0.0.0.0/0"]
-    }
   }
 
   eks_managed_node_groups = {
     brain = {
-      # UPGRADED: T3.Large (8GB) to handle the AI orchestration load
-      instance_types = ["t3.large"]
+      instance_types = ["t3.large"] # 8GB RAM to ensure no OOM join failures
       ami_type       = "AL2023_x86_64_STANDARD"
       min_size       = 1
-      max_size       = 2
+      max_size       = 1
       desired_size   = 1
     }
   }
 
   access_entries = {
-    # THE FIX: Grant the Runner cluster-admin
     runner = {
       principal_arn = var.runner_arn
       policy_associations = {
@@ -106,26 +98,40 @@ module "eks" {
   }
 }
 
-# --- 3. IAM FOR LBC ---
+# --- 4. RAW IAM RESOURCES (Fixed: No nested modules) ---
+
+# Load Balancer Controller Policy
 resource "aws_iam_policy" "lb_controller" {
   name   = "AWSLBCPolicy-Hypernova"
   policy = data.http.lb_policy.response_body
 }
 
-module "lb_role" {
-  source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
-  role_name = "lb-controller-hypernova"
-  attach_load_balancer_controller_policy = false
-  role_policy_arns = { policy = aws_iam_policy.lb_controller.arn }
-  oidc_providers = {
-    main = {
-      provider_arn               = module.eks.oidc_provider_arn
-      namespace_service_accounts = ["kube-system:aws-load-balancer-controller"]
-    }
-  }
+# Load Balancer Controller Role with OIDC Trust
+resource "aws_iam_role" "lb_controller" {
+  name = "lb-controller-hypernova"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action = "sts:AssumeRoleWithWebIdentity"
+      Effect = "Allow"
+      Principal = { Federated = module.eks.oidc_provider_arn }
+      Condition = {
+        StringEquals = {
+          "${module.eks.oidc_provider}:sub" = "system:serviceaccount:kube-system:aws-load-balancer-controller"
+        }
+      }
+    }]
+  })
 }
 
+resource "aws_iam_role_policy_attachment" "lb_controller_attach" {
+  policy_arn = aws_iam_policy.lb_controller.arn
+  role       = aws_iam_role.lb_controller.name
+}
+
+# --- 5. OUTPUTS ---
 output "cluster_name" { value = module.eks.cluster_name }
 output "region"       { value = "us-east-1" }
 output "vpc_id"       { value = module.vpc.vpc_id }
-output "lb_role_arn"  { value = module.lb_role.iam_role_arn }
+output "lb_role_arn"  { value = aws_iam_role.lb_controller.arn }

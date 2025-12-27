@@ -7,18 +7,24 @@ TF_DIR="$ROOT_DIR/infra/terraform"
 K8S_DIR="$ROOT_DIR/k8s"
 
 COLOR_CYAN='\033[0;36m'
-COLOR_RED='\033[0;31m'
 COLOR_GREEN='\033[0;32m'
 COLOR_RESET='\033[0m'
 
-function log() { echo -e "${COLOR_CYAN}[HYPERNOVA-LOG] $1${COLOR_RESET}"; }
-function error_log() { echo -e "${COLOR_RED}[HYPERNOVA-ERROR] $1${COLOR_RESET}"; }
+function log() { echo -e "${COLOR_CYAN}[HYPERNOVA] $1${COLOR_RESET}"; }
 
 function bootstrap() {
-    log "📡 Detecting Identity..."
+    log "📡 Detecting Cloud Identity..."
     RUNNER_ARN=$(aws sts get-caller-identity --query Arn --output text)
     ACCOUNT_ID=$(echo $RUNNER_ARN | cut -d: -f5)
-    [[ $RUNNER_ARN == *"assumed-role"* ]] && CLEAN_ARN="arn:aws:iam::$ACCOUNT_ID:role/$(echo $RUNNER_ARN | cut -d/ -f2)" || CLEAN_ARN=$RUNNER_ARN
+    
+    # Clean assumed-role for EKS entry
+    if [[ $RUNNER_ARN == *"assumed-role"* ]]; then
+        ROLE_NAME=$(echo $RUNNER_ARN | cut -d/ -f2)
+        CLEAN_ARN="arn:aws:iam::$ACCOUNT_ID:role/$ROLE_NAME"
+    else
+        CLEAN_ARN=$RUNNER_ARN
+    fi
+
     BUCKET="hypernova-state-$ACCOUNT_ID"
     aws s3 mb "s3://$BUCKET" --region us-east-1 2>/dev/null || true
     INIT_OPTS=(-backend-config="bucket=$BUCKET")
@@ -27,8 +33,10 @@ function bootstrap() {
 
 function ignite() {
     bootstrap
-    log "🚀 Ignite Sequence: V10.0.0"
+    log "🚀 Igniting V11.0.0 (Atomic Standard)"
     cd "$TF_DIR"
+    
+    # Hard purge to ensure init is fresh
     rm -rf .terraform .terraform.lock.hcl
     terraform init "${INIT_OPTS[@]}" -reconfigure
     terraform apply "${APPLY_OPTS[@]}"
@@ -38,10 +46,7 @@ function ignite() {
     ROLE_ARN=$(terraform output -raw lb_role_arn)
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
 
-    log "🧹 Purging Webhook Sentries..."
-    kubectl delete mutatingwebhookconfiguration --all || true
-
-    log "🛠️ Registering Repos..."
+    log "🛠️ Registering Global Repos..."
     helm repo add cilium https://helm.cilium.io/
     helm repo add eks https://aws.github.io/eks-charts
     helm repo add ray https://ray-project.github.io/kuberay-helm/
@@ -56,45 +61,35 @@ function ignite() {
       -n karpenter --create-namespace --set settings.clusterName="$NAME" --wait=false
     helm upgrade --install kuberay-operator ray/kuberay-operator --version 1.2.2 --wait=false
 
-    log "💉 Phase 3: AWS LBC..."
+    log "💉 Phase 3: AWS Load Balancer Controller..."
+    kubectl delete mutatingwebhookconfiguration elbv2.k8s.aws-mutating-webhook-configuration --ignore-not-found
     kubectl apply -f https://raw.githubusercontent.com/aws/eks-charts/master/stable/aws-load-balancer-controller/crds/crds.yaml
     helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system \
       --set clusterName="$NAME" --set serviceAccount.create=true \
+      --set serviceAccount.name=aws-load-balancer-controller \
       --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="$ROLE_ARN" \
       --set region=us-east-1 --set vpcId="$VPC_ID" \
       --set webhookConfig.failurePolicy=Ignore --wait=false
 
-    log "✅ SYSTEM ARMED. Run 'demo' once nodes appear."
+    log "✅ SYSTEM ARMED. Check nodes with 'kubectl get nodes'."
 }
 
 function demo() {
     bootstrap
-    log "🎭 Launching Spectator Protocol..."
+    log "🎭 Launching Spectator..."
     aws eks update-kubeconfig --region us-east-1 --name "neural-hypernova"
 
-    # THE NODE-SENTRY: Wait for at least one node to join
-    log "⏳ Phase 0: Waiting for Brain Node to join cluster..."
-    local NODE_COUNT=0
-    while [ "$NODE_COUNT" -eq 0 ]; do
-        NODE_COUNT=$(kubectl get nodes --no-headers 2>/dev/null | wc -l || echo 0)
-        if [ "$NODE_COUNT" -gt 0 ]; then
-            log "✅ Node joined! Population: $NODE_COUNT"
-            break
-        fi
-        log "Still waiting for EC2 instances to register... (10s)"
-        sleep 10
+    log "⏳ Waiting for Nodes to join..."
+    while [ "$(kubectl get nodes --no-headers 2>/dev/null | wc -l)" -eq 0 ]; do
+        log "Waiting for Brain Node (t3.large)..."
+        sleep 15
     done
 
-    log "⚔️  Clearing Webhook deadlocks..."
-    kubectl delete mutatingwebhookconfiguration elbv2.k8s.aws-mutating-webhook-configuration --ignore-not-found
-
-    log "🏗️ Applying Downsized Manifest..."
+    log "🏗️ Applying Ray Workload..."
     kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"
-
-    log "⏳ Phase 1: Waiting for Ray Head Pod..."
     kubectl wait --for=condition=Ready pod -l ray.io/node-type=head --timeout=600s
 
-    log "🌐 Provisioning Dashboard NLB..."
+    log "🌐 Provisioning Dashboard..."
     cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: Service
@@ -103,14 +98,11 @@ metadata:
   annotations:
     service.beta.kubernetes.io/aws-load-balancer-type: external
     service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: instance
-    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
 spec:
   type: LoadBalancer
   selector: { ray.io/node-type: head }
   ports: [{ name: dash, port: 8265, targetPort: 8265 }]
 EOF
-
-    log "⏳ Phase 2: DNS Propagation..."
     URL=""
     while [ -z "$URL" ]; do
         URL=$(kubectl get svc hypernova-dashboard-lb -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
