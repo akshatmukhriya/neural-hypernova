@@ -9,7 +9,7 @@ K8S_DIR="$ROOT_DIR/k8s"
 function log() { echo -e "\033[0;36m[HYPERNOVA] $1\033[0m"; }
 
 function bootstrap() {
-    log "📡 Detecting Identity..."
+    log "📡 Detecting Cloud Identity..."
     RUNNER_ARN=$(aws sts get-caller-identity --query Arn --output text)
     ACCOUNT_ID=$(echo $RUNNER_ARN | cut -d: -f5)
     [[ $RUNNER_ARN == *"assumed-role"* ]] && CLEAN_ARN="arn:aws:iam::$ACCOUNT_ID:role/$(echo $RUNNER_ARN | cut -d/ -f2)" || CLEAN_ARN=$RUNNER_ARN
@@ -21,7 +21,7 @@ function bootstrap() {
 
 function ignite() {
     bootstrap
-    log "🚀 Igniting V8.0.0 (The Bypass Protocol)..."
+    log "🚀 Igniting V8.1.0 (The Exclusion Protocol)..."
     cd "$TF_DIR"
     rm -rf .terraform .terraform.lock.hcl
     terraform init "${INIT_OPTS[@]}" -reconfigure
@@ -38,78 +38,53 @@ function ignite() {
     helm repo add ray https://ray-project.github.io/kuberay-helm/
     helm repo update
 
-    log "💉 Phase 1: Injecting Cilium eBPF..."
+    log "💉 Phase 1: Cilium eBPF (Fast-Path)..."
+    # Wait=false to allow background stabilization
     helm upgrade --install cilium cilium/cilium --version 1.16.5 -n kube-system \
       --set kubeProxyReplacement=true --set-string debug.verbose="" --wait=false
 
-    log "💉 Phase 2: Injecting AWS Load Balancer Controller (Bypass Mode)..."
+    log "💉 Phase 2: AWS Load Balancer Controller (Exclusion Mode)..."
+    kubectl delete mutatingwebhookconfiguration elbv2.k8s.aws-mutating-webhook-configuration --ignore-not-found
     kubectl apply -f https://raw.githubusercontent.com/aws/eks-charts/master/stable/aws-load-balancer-controller/crds/crds.yaml
     
+    # THE UNICORN FIX: Narrow the Webhook Scope
+    # We tell LBC to ONLY watch objects with the label 'hypernova-controlled=true'.
+    # Since Karpenter/Ray don't have this, the API server will skip the webhook for them.
     helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system \
       --set clusterName="$NAME" --set serviceAccount.create=true \
       --set serviceAccount.name=aws-load-balancer-controller \
       --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="$ROLE_ARN" \
       --set region=us-east-1 --set vpcId="$VPC_ID" \
-      --set webhookConfig.failurePolicy=Ignore --wait=false
+      --set webhookConfig.objectSelector.matchLabels.hypernova-controlled="true" \
+      --wait=false
 
-    # --- THE PRO BYPASS: REMOVE BLOCKING WEBHOOKS ---
-    log "⚔️  Surgical Strike: Removing Webhook Sentries to prevent Deadlock..."
-    # We delete these configurations so the API server stops trying to call the LBC
-    kubectl delete mutatingwebhookconfiguration elbv2.k8s.aws-mutating-webhook-configuration --ignore-not-found
-    kubectl delete validatingwebhookconfiguration elbv2.k8s.aws-validating-webhook-configuration --ignore-not-found
-    
-    log "💉 Phase 3: Injecting Karpenter & KubeRay (Zero Resistance)..."
-    # These will now install instantly because the webhooks are gone
+    log "💉 Phase 3: Karpenter & KubeRay (Direct-Inject)..."
+    # No resistance now because they don't match the selector
     helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter --version 1.1.1 \
       -n karpenter --create-namespace --set settings.clusterName="$NAME" --wait=false
-
     helm upgrade --install kuberay-operator ray/kuberay-operator --version 1.2.2 --wait=false
 
-    log "🏗️ Finalizing Infrastructure..."
-    # Allow 45s for the LBC pod to start. It will recreate the webhooks itself once healthy.
-    sleep 45
+    log "🏗️ Finalizing AI Forge..."
+    # Small buffer for the API server to process the background helm releases
+    sleep 30
     kubectl apply -f "$K8S_DIR/core/karpenter-gpu-pool.yaml"
     kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"
     
-    log "✅ SYSTEM ARMED. Hypernova is stabilizing in the background."
-}
-
-function nuke() {
-    bootstrap
-    log "☢️ SCORCHED EARTH..."
-    cd "$TF_DIR"
-    rm -rf .terraform .terraform.lock.hcl
-    terraform init "${INIT_OPTS[@]}" -reconfigure || true
-    VPC_ID=$(terraform output -raw vpc_id 2>/dev/null || echo "")
-    CLUSTER_NAME="neural-hypernova"
-
-    log "1. CLI Purge..."
-    kubectl delete svc hypernova-dashboard-lb --ignore-not-found || true
-    aws eks delete-nodegroup --cluster-name "$CLUSTER_NAME" --nodegroup-name brain --region us-east-1 2>/dev/null || true
-    aws eks delete-cluster --name "$CLUSTER_NAME" --region us-east-1 2>/dev/null || true
-    EIPS=$(aws ec2 describe-addresses --region us-east-1 --query "Addresses[?VpcId=='$VPC_ID'].AllocationId" --output text)
-    for eip in $EIPS; do aws ec2 release-address --allocation-id "$eip" --region us-east-1 || true; done
-
-    log "2. Infrastructure Destruction..."
-    terraform destroy "${APPLY_OPTS[@]}" || true
-    
-    if [ ! -z "$VPC_ID" ] && [ "$VPC_ID" != "null" ]; then
-        log "3. Deep Sweep..."
-        ENIS=$(aws ec2 describe-network-interfaces --filters "Name=vpc-id,Values=$VPC_ID" --query "NetworkInterfaces[*].NetworkInterfaceId" --output text)
-        for eni in $ENIS; do aws ec2 delete-network-interface --network-interface-id "$eni" || true; done
-    fi
-    log "🌑 CLEAN."
+    log "✅ SYSTEM ARMED. The Supernova is converging."
 }
 
 function demo() {
     bootstrap
     log "🎭 Spectator Mode..."
     aws eks update-kubeconfig --region us-east-1 --name "neural-hypernova"
-    kubectl apply -f - <<EOF
+    # We add the label to the Service so the LBC actually sees it!
+    cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: Service
 metadata:
   name: hypernova-dashboard-lb
+  labels:
+    hypernova-controlled: "true"
   annotations:
     service.beta.kubernetes.io/aws-load-balancer-type: external
     service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: instance
@@ -122,9 +97,29 @@ EOF
     URL=""
     while [ -z "$URL" ]; do
         URL=$(kubectl get svc hypernova-dashboard-lb -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
-        sleep 10
+        [ -z "$URL" ] && sleep 10
     done
     log "🚀 DASHBOARD: http://$URL:8265"
+}
+
+function nuke() {
+    bootstrap
+    log "☢️ SCORCHED EARTH..."
+    cd "$TF_DIR"
+    rm -rf .terraform .terraform.lock.hcl
+    terraform init "${INIT_OPTS[@]}" -reconfigure || true
+    VPC_ID=$(terraform output -raw vpc_id 2>/dev/null || echo "")
+    CLUSTER_NAME="neural-hypernova"
+    kubectl delete svc hypernova-dashboard-lb --ignore-not-found || true
+    aws eks delete-cluster --name "$CLUSTER_NAME" --region us-east-1 2>/dev/null || true
+    EIPS=$(aws ec2 describe-addresses --region us-east-1 --query "Addresses[?VpcId=='$VPC_ID'].AllocationId" --output text)
+    for eip in $EIPS; do aws ec2 release-address --allocation-id "$eip" --region us-east-1 || true; done
+    terraform destroy "${APPLY_OPTS[@]}" || true
+    if [ ! -z "$VPC_ID" ] && [ "$VPC_ID" != "null" ]; then
+        ENIS=$(aws ec2 describe-network-interfaces --filters "Name=vpc-id,Values=$VPC_ID" --query "NetworkInterfaces[*].NetworkInterfaceId" --output text)
+        for eni in $ENIS; do aws ec2 delete-network-interface --network-interface-id "$eni" || true; done
+    fi
+    log "🌑 CLEAN."
 }
 
 case "$1" in
