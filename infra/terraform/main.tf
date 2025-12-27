@@ -1,4 +1,4 @@
-# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V43.0.0 ---
+# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V44.0.0 ---
 
 terraform {
   required_version = ">= 1.5.0"
@@ -22,7 +22,6 @@ resource "random_string" "id" {
 }
 
 data "aws_caller_identity" "current" {}
-data "aws_partition" "current" {}
 
 # --- 1. NETWORK ---
 module "vpc" {
@@ -53,12 +52,14 @@ module "eks" {
   vpc_id          = module.vpc.vpc_id
   subnet_ids      = module.vpc.private_subnets
 
-  authentication_mode                      = "API_AND_CONFIG_MAP"
-  enable_cluster_creator_admin_permissions = true
-  cluster_endpoint_public_access           = true
-
-  create_kms_key              = false
+  # --- INDUSTRIAL DEFAULTS ONLY ---
+  # We OMIT all cluster_encryption_config and create_kms_key blocks.
+  # This forces the module to use its internal, stable defaults.
   create_cloudwatch_log_group = false
+  authentication_mode         = "API_AND_CONFIG_MAP"
+  
+  # Sovereign Admin Access
+  enable_cluster_creator_admin_permissions = true
 
   node_security_group_tags = {
     "karpenter.sh/discovery" = "hypernova-${random_string.id.result}"
@@ -66,7 +67,7 @@ module "eks" {
 
   node_security_group_additional_rules = {
     ingress_ray = {
-      description = "Ray Dashboard NodePort"
+      description = "Ray Dashboard"
       protocol    = "tcp"
       from_port   = 30265
       to_port     = 30265
@@ -95,25 +96,19 @@ module "eks" {
   }
 }
 
-# --- 3. KARPENTER INFRASTRUCTURE (EXPLICIT) ---
+# --- 3. KARPENTER INFRASTRUCTURE ---
 resource "aws_sqs_queue" "karpenter_interruption" {
-  name                      = "hypernova-interruption-${random_string.id.result}"
+  name                      = "hypernova-int-${random_string.id.result}"
   message_retention_seconds = 300
 }
 
 module "karpenter_controller_role" {
   source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
   version = "5.33.0"
-
   role_name = "karpenter-ctrl-${random_string.id.result}"
-
   attach_karpenter_controller_policy = true
   karpenter_controller_cluster_name  = "hypernova-${random_string.id.result}"
-  
-  karpenter_controller_node_iam_role_arns = [
-    "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/KarpenterNodeRole-hypernova-${random_string.id.result}"
-  ]
-
+  karpenter_controller_node_iam_role_arns = ["arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/KarpenterNodeRole-hypernova-${random_string.id.result}"]
   oidc_providers = {
     main = {
       provider_arn               = module.eks.oidc_provider_arn
@@ -122,49 +117,29 @@ module "karpenter_controller_role" {
   }
 }
 
-# PRECISION FIX: Attach SQS permissions directly to bypass module argument drift
-resource "aws_iam_role_policy" "karpenter_sqs_interruption" {
-  name = "karpenter-sqs-interruption"
+resource "aws_iam_role_policy" "karpenter_sqs" {
+  name = "karpenter-sqs-access"
   role = module.karpenter_controller_role.iam_role_name
-
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
-      {
-        Action = [
-          "sqs:DeleteMessage",
-          "sqs:GetQueueAttributes",
-          "sqs:ReceiveMessage"
-        ]
-        Effect   = "Allow"
-        Resource = aws_sqs_queue.karpenter_interruption.arn
-      }
-    ]
+    Statement = [{
+      Action = ["sqs:DeleteMessage", "sqs:GetQueueAttributes", "sqs:ReceiveMessage"]
+      Effect = "Allow"
+      Resource = aws_sqs_queue.karpenter_interruption.arn
+    }]
   })
 }
 
-resource "aws_iam_role_policy" "karpenter_describe_cluster" {
-  name = "karpenter-describe-api"
+resource "aws_iam_role_policy" "karpenter_eks" {
+  name = "karpenter-eks-access"
   role = module.karpenter_controller_role.iam_role_name
-
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
-      {
-        Action = [
-          "eks:DescribeCluster",
-          "ec2:DescribeSubnets",
-          "ec2:DescribeSecurityGroups",
-          "ec2:DescribeInstances",
-          "ec2:DescribeInstanceTypes",
-          "ec2:DescribeInstanceTypeOfferings",
-          "ec2:DescribeAvailabilityZones",
-          "ssm:GetParameter"
-        ]
-        Effect   = "Allow"
-        Resource = "*"
-      }
-    ]
+    Statement = [{
+      Action = ["eks:DescribeCluster", "ec2:DescribeSubnets", "ec2:DescribeSecurityGroups", "ec2:DescribeInstances", "ec2:DescribeInstanceTypes", "ec2:DescribeInstanceTypeOfferings", "ec2:DescribeAvailabilityZones", "ssm:GetParameter"]
+      Effect = "Allow"
+      Resource = "*"
+    }]
   })
 }
 
