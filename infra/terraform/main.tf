@@ -1,4 +1,4 @@
-# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V19.0.0 ---
+# --- NEURAL HYPERNOVA: SOVEREIGN INFRASTRUCTURE V20.0.0 ---
 
 terraform {
   required_version = ">= 1.5.0"
@@ -59,12 +59,31 @@ module "eks" {
 
   create_kms_key              = false
   create_cloudwatch_log_group = false
-  authentication_mode         = "API_AND_CONFIG_MAP"
+  cluster_encryption_config   = {} 
+
+  authentication_mode            = "API_AND_CONFIG_MAP"
   cluster_endpoint_public_access = true
   enable_cluster_creator_admin_permissions = true
 
-  # REQUIRED: Disable module's internal rules to prevent 'Duplicate' collisions
-  node_security_group_enable_recommended_rules = false
+  node_security_group_enable_recommended_rules = true
+  node_security_group_additional_rules = {
+    ingress_vpc_all = {
+      description = "VPC Internal Handshake"
+      protocol    = "-1"
+      from_port   = 0
+      to_port     = 0
+      type        = "ingress"
+      cidr_blocks = ["10.0.0.0/16"]
+    }
+    ingress_ray = {
+      description = "Ray Dashboard Public"
+      protocol    = "tcp"
+      from_port   = 8265
+      to_port     = 8265
+      type        = "ingress"
+      cidr_blocks = ["0.0.0.0/0"]
+    }
+  }
 
   eks_managed_node_groups = {
     brain = {
@@ -77,38 +96,7 @@ module "eks" {
   }
 }
 
-# --- 3. ATOMIC SECURITY (Manual Definition) ---
-resource "aws_security_group_rule" "node_vpc_ingress" {
-  description       = "Allow all VPC traffic"
-  type              = "ingress"
-  from_port         = 0
-  to_port           = 0
-  protocol          = "-1"
-  cidr_blocks       = ["10.0.0.0/16"]
-  security_group_id = module.eks.node_security_group_id
-}
-
-resource "aws_security_group_rule" "node_public_egress" {
-  description       = "Allow all egress"
-  type              = "egress"
-  from_port         = 0
-  to_port           = 0
-  protocol          = "-1"
-  cidr_blocks       = ["0.0.0.0/0"]
-  security_group_id = module.eks.node_security_group_id
-}
-
-resource "aws_security_group_rule" "node_ray_public" {
-  description       = "Allow Ray Dashboard Public"
-  type              = "ingress"
-  from_port         = 8265
-  to_port           = 8265
-  protocol          = "tcp"
-  cidr_blocks       = ["0.0.0.0/0"]
-  security_group_id = module.eks.node_security_group_id
-}
-
-# --- 4. IAM FOR LBC ---
+# --- 3. IAM ---
 resource "aws_iam_policy" "lbc" {
   name        = "AWSLBCPolicy-${random_string.id.result}"
   policy      = data.http.lb_policy.response_body
