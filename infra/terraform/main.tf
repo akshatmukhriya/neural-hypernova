@@ -1,4 +1,4 @@
-# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V23.0.0 ---
+# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V24.0.0 ---
 
 terraform {
   required_version = ">= 1.5.0"
@@ -13,11 +13,8 @@ terraform {
   }
 }
 
-provider "aws" {
-  region = "us-east-1"
-}
+provider "aws" { region = "us-east-1" }
 
-# --- 1. GLOBAL VARIABLES ---
 variable "runner_arn" {
   type    = string
   default = ""
@@ -31,7 +28,7 @@ resource "random_string" "id" {
 
 data "aws_caller_identity" "current" {}
 
-# --- 2. NETWORK ---
+# --- 1. NETWORK ---
 module "vpc" {
   source  = "terraform-aws-modules/vpc/aws"
   version = "5.2.0"
@@ -44,11 +41,10 @@ module "vpc" {
 
   enable_nat_gateway = true
   single_nat_gateway = true 
-
   public_subnet_tags = { "kubernetes.io/role/elb" = 1 }
 }
 
-# --- 3. SECURITY GROUP (NLB BYPASS GATE) ---
+# --- 2. SECURITY GROUP ---
 resource "aws_security_group" "forge_sg" {
   name_prefix = "hypernova-forge-sg-${random_string.id.result}"
   vpc_id      = module.vpc.vpc_id
@@ -61,7 +57,7 @@ resource "aws_security_group" "forge_sg" {
   }
 
   ingress {
-    from_port   = 30265 # NodePort for Dashboard Bypass
+    from_port   = 30265 
     to_port     = 30265
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
@@ -73,13 +69,9 @@ resource "aws_security_group" "forge_sg" {
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
-
-  lifecycle {
-    create_before_destroy = true
-  }
 }
 
-# --- 4. EKS CLUSTER (1.31) ---
+# --- 3. EKS CLUSTER (1.31) ---
 module "eks" {
   source  = "terraform-aws-modules/eks/aws"
   version = "20.24.0"
@@ -96,9 +88,22 @@ module "eks" {
   authentication_mode            = "API_AND_CONFIG_MAP"
   cluster_endpoint_public_access = true
 
-  # THE IDENTITY FIX: Enable this flag and REMOVE the access_entries block
-  # This grants the Runner (Cluster Creator) full admin rights natively.
-  enable_cluster_creator_admin_permissions = true
+  # THE PRESTIGE FIX: 
+  # Disable automatic creator permissions to stop the 409 API conflict.
+  enable_cluster_creator_admin_permissions = false
+
+  # Manually define the runner's access entry. Terraform now has 100% ownership.
+  access_entries = {
+    runner = {
+      principal_arn = var.runner_arn
+      policy_associations = {
+        admin = {
+          policy_arn = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+          access_scope = { type = "cluster" }
+        }
+      }
+    }
+  }
 
   eks_managed_node_groups = {
     brain = {
@@ -109,7 +114,7 @@ module "eks" {
   }
 }
 
-# --- 5. OUTPUTS ---
+# --- 4. OUTPUTS ---
 output "cluster_name"    { value = module.eks.cluster_name }
 output "vpc_id"          { value = module.vpc.vpc_id }
 output "public_subnets"  { value = module.vpc.public_subnets }
