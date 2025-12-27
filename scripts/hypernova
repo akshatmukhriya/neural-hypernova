@@ -12,14 +12,7 @@ function bootstrap() {
     log "📡 Detecting Identity..."
     RUNNER_ARN=$(aws sts get-caller-identity --query Arn --output text)
     ACCOUNT_ID=$(echo $RUNNER_ARN | cut -d: -f5)
-    
-    if [[ $RUNNER_ARN == *"assumed-role"* ]]; then
-        ROLE_NAME=$(echo $RUNNER_ARN | cut -d/ -f2)
-        CLEAN_ARN="arn:aws:iam::$ACCOUNT_ID:role/$ROLE_NAME"
-    else
-        CLEAN_ARN=$RUNNER_ARN
-    fi
-
+    [[ $RUNNER_ARN == *"assumed-role"* ]] && CLEAN_ARN="arn:aws:iam::$ACCOUNT_ID:role/$(echo $RUNNER_ARN | cut -d/ -f2)" || CLEAN_ARN=$RUNNER_ARN
     BUCKET="hypernova-state-$ACCOUNT_ID"
     aws s3 mb "s3://$BUCKET" --region us-east-1 2>/dev/null || true
     INIT_OPTS=(-backend-config="bucket=$BUCKET")
@@ -27,8 +20,8 @@ function bootstrap() {
 }
 
 function ignite() {
-   bootstrap
-    log "🚀 Igniting V7.0.0 (Asynchronous Resilience)..."
+    bootstrap
+    log "🚀 Igniting V8.0.0 (The Bypass Protocol)..."
     cd "$TF_DIR"
     rm -rf .terraform .terraform.lock.hcl
     terraform init "${INIT_OPTS[@]}" -reconfigure
@@ -42,67 +35,66 @@ function ignite() {
     log "🛠️ Updating Repos..."
     helm repo add cilium https://helm.cilium.io/
     helm repo add eks https://aws.github.io/eks-charts
-    helm repo add kuberay https://ray-project.github.io/kuberay-helm/
+    helm repo add ray https://ray-project.github.io/kuberay-helm/
     helm repo update
 
-    log "💉 Phase 1: Cilium eBPF..."
-    # NO WAIT: Let Kubernetes handle the pull and init in the background
+    log "💉 Phase 1: Injecting Cilium eBPF..."
     helm upgrade --install cilium cilium/cilium --version 1.16.5 -n kube-system \
-      --set kubeProxyReplacement=true --set-string debug.verbose=""
+      --set kubeProxyReplacement=true --set-string debug.verbose="" --wait=false
 
-    log "💉 Phase 2: AWS Load Balancer Controller..."
-    kubectl delete mutatingwebhookconfiguration elbv2.k8s.aws-mutating-webhook-configuration --ignore-not-found
+    log "💉 Phase 2: Injecting AWS Load Balancer Controller (Bypass Mode)..."
     kubectl apply -f https://raw.githubusercontent.com/aws/eks-charts/master/stable/aws-load-balancer-controller/crds/crds.yaml
     
-    # THE PRECISION FIX: Match serviceAccount name with IAM role exactly
     helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system \
       --set clusterName="$NAME" --set serviceAccount.create=true \
       --set serviceAccount.name=aws-load-balancer-controller \
       --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="$ROLE_ARN" \
       --set region=us-east-1 --set vpcId="$VPC_ID" \
-      --set webhookConfig.failurePolicy=Ignore
+      --set webhookConfig.failurePolicy=Ignore --wait=false
 
-    log "💉 Phase 3: Karpenter & KubeRay..."
+    # --- THE PRO BYPASS: REMOVE BLOCKING WEBHOOKS ---
+    log "⚔️  Surgical Strike: Removing Webhook Sentries to prevent Deadlock..."
+    # We delete these configurations so the API server stops trying to call the LBC
+    kubectl delete mutatingwebhookconfiguration elbv2.k8s.aws-mutating-webhook-configuration --ignore-not-found
+    kubectl delete validatingwebhookconfiguration elbv2.k8s.aws-validating-webhook-configuration --ignore-not-found
+    
+    log "💉 Phase 3: Injecting Karpenter & KubeRay (Zero Resistance)..."
+    # These will now install instantly because the webhooks are gone
     helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter --version 1.1.1 \
-      -n karpenter --create-namespace --set settings.clusterName="$NAME"
-    helm upgrade --install kuberay-operator kuberay/kuberay-operator --version 1.2.2
+      -n karpenter --create-namespace --set settings.clusterName="$NAME" --wait=false
+
+    helm upgrade --install kuberay-operator ray/kuberay-operator --version 1.2.2 --wait=false
 
     log "🏗️ Finalizing Infrastructure..."
-    # Allow 60s for images to pull and networking to stabilize before manifests
-    sleep 60
+    # Allow 45s for the LBC pod to start. It will recreate the webhooks itself once healthy.
+    sleep 45
     kubectl apply -f "$K8S_DIR/core/karpenter-gpu-pool.yaml"
     kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"
     
-    log "✅ IGNITION COMPLETE. Checking pod status..."
-    kubectl get pods -A
-    log "🚀 HYPERNOVA IS LIVE."
+    log "✅ SYSTEM ARMED. Hypernova is stabilizing in the background."
 }
 
 function nuke() {
     bootstrap
-    log "☢️ NUCLEAR RESET..."
+    log "☢️ SCORCHED EARTH..."
     cd "$TF_DIR"
     rm -rf .terraform .terraform.lock.hcl
     terraform init "${INIT_OPTS[@]}" -reconfigure || true
-    
     VPC_ID=$(terraform output -raw vpc_id 2>/dev/null || echo "")
-    REGION="us-east-1"
     CLUSTER_NAME="neural-hypernova"
 
     log "1. CLI Purge..."
     kubectl delete svc hypernova-dashboard-lb --ignore-not-found || true
-    aws eks delete-nodegroup --cluster-name "$CLUSTER_NAME" --nodegroup-name brain --region $REGION 2>/dev/null || true
-    aws eks delete-cluster --name "$CLUSTER_NAME" --region $REGION 2>/dev/null || true
+    aws eks delete-nodegroup --cluster-name "$CLUSTER_NAME" --nodegroup-name brain --region us-east-1 2>/dev/null || true
+    aws eks delete-cluster --name "$CLUSTER_NAME" --region us-east-1 2>/dev/null || true
+    EIPS=$(aws ec2 describe-addresses --region us-east-1 --query "Addresses[?VpcId=='$VPC_ID'].AllocationId" --output text)
+    for eip in $EIPS; do aws ec2 release-address --allocation-id "$eip" --region us-east-1 || true; done
 
-    log "2. EIP Release..."
-    EIPS=$(aws ec2 describe-addresses --region $REGION --query "Addresses[?VpcId=='$VPC_ID'].AllocationId" --output text)
-    for eip in $EIPS; do aws ec2 release-address --allocation-id "$eip" --region $REGION || true; done
-
-    log "3. Terraform Destroy..."
+    log "2. Infrastructure Destruction..."
     terraform destroy "${APPLY_OPTS[@]}" || true
     
-    log "4. ENI Sweep..."
     if [ ! -z "$VPC_ID" ] && [ "$VPC_ID" != "null" ]; then
+        log "3. Deep Sweep..."
         ENIS=$(aws ec2 describe-network-interfaces --filters "Name=vpc-id,Values=$VPC_ID" --query "NetworkInterfaces[*].NetworkInterfaceId" --output text)
         for eni in $ENIS; do aws ec2 delete-network-interface --network-interface-id "$eni" || true; done
     fi
@@ -112,8 +104,7 @@ function nuke() {
 function demo() {
     bootstrap
     log "🎭 Spectator Mode..."
-    NAME="neural-hypernova"
-    aws eks update-kubeconfig --region us-east-1 --name "$NAME"
+    aws eks update-kubeconfig --region us-east-1 --name "neural-hypernova"
     kubectl apply -f - <<EOF
 apiVersion: v1
 kind: Service
@@ -122,7 +113,6 @@ metadata:
   annotations:
     service.beta.kubernetes.io/aws-load-balancer-type: external
     service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: instance
-    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
 spec:
   type: LoadBalancer
   selector: { ray.io/node-type: head }
