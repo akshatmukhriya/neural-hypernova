@@ -15,14 +15,7 @@ function bootstrap() {
     log "📡 Detecting Cloud Identity..."
     RUNNER_ARN=$(aws sts get-caller-identity --query Arn --output text)
     ACCOUNT_ID=$(echo $RUNNER_ARN | cut -d: -f5)
-    
-    if [[ $RUNNER_ARN == *"assumed-role"* ]]; then
-        ROLE_NAME=$(echo $RUNNER_ARN | cut -d/ -f2)
-        CLEAN_ARN="arn:aws:iam::$ACCOUNT_ID:role/$ROLE_NAME"
-    else
-        CLEAN_ARN=$RUNNER_ARN
-    fi
-    
+    [[ $RUNNER_ARN == *"assumed-role"* ]] && CLEAN_ARN="arn:aws:iam::$ACCOUNT_ID:role/$(echo $RUNNER_ARN | cut -d/ -f2)" || CLEAN_ARN=$RUNNER_ARN
     BUCKET="hypernova-state-$ACCOUNT_ID"
     aws s3 mb "s3://$BUCKET" --region us-east-1 2>/dev/null || true
     INIT_OPTS=(-backend-config="bucket=$BUCKET")
@@ -31,17 +24,8 @@ function bootstrap() {
 
 function ignite() {
     bootstrap
-    log "🚀 Ignite Sequence: V28.0.0 (The Cycle Breaker)"
+    log "🚀 Ignite Sequence: V29.0.0 (Unified Success)"
     cd "$TF_DIR"
-    
-    # THE CLEANER: Find the failed cluster and kill it to prevent 'ResourceInUse'
-    log "🧹 Hunting for dead clusters..."
-    OLD_CLUSTERS=$(aws eks list-clusters --region us-east-1 --query "clusters[?contains(@, 'hypernova-')]" --output text)
-    for c in $OLD_CLUSTERS; do
-        log "Found potential conflict: $c. Triggering removal..."
-        aws eks delete-cluster --name "$c" --region us-east-1 || true
-    done
-
     rm -rf .terraform .terraform.lock.hcl
     terraform init "${INIT_OPTS[@]}" -reconfigure
     terraform apply "${APPLY_OPTS[@]}"
@@ -49,7 +33,7 @@ function ignite() {
     NAME=$(terraform output -raw cluster_name)
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
 
-    log "💉 Injecting Cilium eBPF..."
+    log "💉 Injecting Cilium..."
     helm repo add cilium https://helm.cilium.io/
     helm repo update
     helm upgrade --install cilium cilium/cilium --version 1.16.5 -n kube-system \
@@ -59,17 +43,15 @@ function ignite() {
     helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter --version 1.1.1 \
       -n karpenter --create-namespace --set settings.clusterName="$NAME" --wait=false
 
-    log "🏗️ Applying Forge Manifests..."
-    # Small buffer for node join
-    sleep 20
+    log "🏗️ Applying AI Manifests..."
     kubectl apply -f "$K8S_DIR/core/karpenter-gpu-pool.yaml"
     kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"
-    log "✅ SYSTEM ARMED."
+    log "✅ FORGE INITIALIZED."
 }
 
 function demo() {
     bootstrap
-    log "🎭 Launching Spectator Protocol (NLB Bypass)..."
+    log "🎭 Launching Spectator Protocol..."
     cd "$TF_DIR"
     terraform init "${INIT_OPTS[@]}" -reconfigure > /dev/null
     
@@ -91,17 +73,17 @@ spec:
   ports: [{ nodePort: 30265, port: 8265, targetPort: 8265 }]
 EOF
 
-    log "⏳ Phase 0: Waiting for Ray Pod..."
+    log "⏳ Phase 0: Waiting for Nodes and Ray Pod..."
     kubectl wait --for=condition=Ready pod -l ray.io/node-type=head --timeout=600s
 
-    log "🌐 Step 2: Provisioning Physical NLB..."
+    log "🌐 Step 2: Provisioning Industrial NLB..."
     LB_NAME="hyper-lb-$RAND_ID"
     LB_ARN=$(aws elbv2 create-load-balancer --name "$LB_NAME" --subnets $SUBNETS --type network --query "LoadBalancers[0].LoadBalancerArn" --output text)
     
     log "🌐 Step 3: Configuring Target Group..."
     TG_ARN=$(aws elbv2 create-target-group --name "hyper-tg-$RAND_ID" --protocol TCP --port 30265 --vpc-id "$VPC_ID" --target-type instance --query "TargetGroups[0].TargetGroupArn" --output text)
     
-    log "🌐 Step 4: Registering Nodes..."
+    log "🌐 Step 4: Registering Compute Nodes..."
     INSTANCES=$(aws ec2 describe-instances --filters "Name=tag:kubernetes.io/cluster/$NAME,Values=owned" "Name=instance-state-name,Values=running" --query "Reservations[*].Instances[*].InstanceId" --output text)
     for ins in $INSTANCES; do
         aws elbv2 register-targets --target-group-arn "$TG_ARN" --targets Id="$ins" || true
@@ -110,13 +92,24 @@ EOF
     log "🌐 Step 5: Finalizing Listener..."
     aws elbv2 create-listener --load-balancer-arn "$LB_ARN" --protocol TCP --port 8265 --default-actions Type=forward,TargetGroupArn="$TG_ARN" 2>/dev/null || true
 
+    log "⏳ Phase 3: Hardware Verification (Waiting for 'healthy' status)..."
+    local HEALTH="unhealthy"
+    while [ "$HEALTH" != "healthy" ]; do
+        HEALTH=$(aws elbv2 describe-target-health --target-group-arn "$TG_ARN" --query "TargetHealthDescriptions[0].TargetHealth.State" --output text 2>/dev/null || echo "initializing")
+        if [ "$HEALTH" == "healthy" ]; then break; fi
+        log "Hardware Check: $HEALTH... (warming up)"
+        sleep 15
+    done
+
     URL=$(aws elbv2 describe-load-balancers --load-balancer-arns "$LB_ARN" --query "LoadBalancers[0].DNSName" --output text)
-    echo -e "${COLOR_GREEN}🚀 DASHBOARD READY: http://$URL:8265${COLOR_RESET}"
+    echo -e "${COLOR_GREEN}----------------------------------------------------------------"
+    echo "🚀 NEURAL HYPERNOVA LIVE: http://$URL:8265"
+    echo "----------------------------------------------------------------${COLOR_RESET}"
 }
 
 function nuke() {
     bootstrap
-    log "☢️ NUCLEAR RESET..."
+    log "☢️ SCORCHED EARTH..."
     cd "$TF_DIR"
     rm -rf .terraform .terraform.lock.hcl
     terraform init "${INIT_OPTS[@]}" -reconfigure || true
@@ -125,11 +118,11 @@ function nuke() {
     RAND_ID=$(terraform output -raw random_id 2>/dev/null || echo "final")
     NAME=$(terraform output -raw cluster_name 2>/dev/null || echo "hypernova")
 
-    log "1. Purging Hardware..."
+    log "1. Clearing NLB..."
     LB_ARNS=$(aws elbv2 describe-load-balancers --query "LoadBalancers[?contains(LoadBalancerName, 'hyper-lb')].LoadBalancerArn" --output text)
     for lb in $LB_ARNS; do aws elbv2 delete-load-balancer --load-balancer-arn "$lb"; done
 
-    log "2. Erasing Cluster..."
+    log "2. Erasing Cluster Debris..."
     aws eks delete-cluster --name "$NAME" --region us-east-1 2>/dev/null || true
     for eip in $(aws ec2 describe-addresses --region us-east-1 --query "Addresses[?VpcId=='$VPC_ID'].AllocationId" --output text); do
       aws ec2 release-address --allocation-id "$eip" --region us-east-1 || true

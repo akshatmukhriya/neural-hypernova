@@ -1,4 +1,4 @@
-# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V28.0.0 ---
+# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V29.0.0 ---
 
 terraform {
   required_version = ">= 1.5.0"
@@ -15,7 +15,6 @@ terraform {
 
 provider "aws" { region = "us-east-1" }
 
-# THE FORCE REPLACER: Ensures every 'ignite' is a fresh resource
 resource "random_string" "id" {
   length  = 4
   special = false
@@ -56,17 +55,15 @@ module "eks" {
   enable_cluster_creator_admin_permissions = false
   cluster_endpoint_public_access           = true
 
-  # REQUIRED: Disable all custom KMS/Logs to prevent global collisions
   create_kms_key              = false
   create_cloudwatch_log_group = false
   cluster_encryption_config   = {}
 
-  # ALLOW THE Handshake ports in the default SG
   node_security_group_additional_rules = {
     ingress_ray = {
-      description = "Ray Dashboard"
+      description = "Ray Dashboard NodePort"
       protocol    = "tcp"
-      from_port   = 30265 # NodePort for the bypass
+      from_port   = 30265
       to_port     = 30265
       type        = "ingress"
       cidr_blocks = ["0.0.0.0/0"]
@@ -74,7 +71,6 @@ module "eks" {
   }
 
   access_entries = {
-    # 1. GitHub Runner Access
     runner = {
       principal_arn = var.runner_arn
       policy_associations = {
@@ -88,7 +84,6 @@ module "eks" {
 
   eks_managed_node_groups = {
     brain = {
-      # Use a unique name to prevent 'modifying failed resource' loop
       name           = "node-pool-${random_string.id.result}"
       instance_types = ["t3.large"]
       ami_type       = "AL2023_x86_64_STANDARD"
@@ -97,14 +92,6 @@ module "eks" {
       desired_size   = 1
     }
   }
-}
-
-# --- 3. DYNAMIC NODE IDENTITY (The Join Fix) ---
-# This forces the EKS API to trust the node role created by the module
-resource "aws_eks_access_entry" "node_join" {
-  cluster_name  = module.eks.cluster_name
-  principal_arn = module.eks.eks_managed_node_groups["brain"].iam_role_arn
-  type          = "EC2_LINUX"
 }
 
 output "cluster_name"    { value = module.eks.cluster_name }
