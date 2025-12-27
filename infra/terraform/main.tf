@@ -101,12 +101,18 @@ module "eks" {
 module "karpenter_controller_role" {
   source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
   version = "5.33.0"
+
   role_name = "karpenter-controller-${random_string.id.result}"
+
+  # Core Karpenter Policy
   attach_karpenter_controller_policy = true
   karpenter_controller_cluster_name  = "hypernova-${random_string.id.result}"
+  
+  # Link the Node Role we created in Step 2
   karpenter_controller_node_iam_role_arns = [
     "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/KarpenterNodeRole-hypernova"
   ]
+
   oidc_providers = {
     main = {
       provider_arn               = module.eks.oidc_provider_arn
@@ -115,9 +121,10 @@ module "karpenter_controller_role" {
   }
 }
 
+# --- THE MISSING LINK: Cluster Description Permissions ---
 resource "aws_iam_role_policy" "karpenter_describe_cluster" {
-  name = "karpenter-describe-cluster"
-  role = module.karpenter_role.iam_role_name # Ensure this matches your module name
+  name = "karpenter-describe-cluster-api"
+  role = module.karpenter_controller_role.iam_role_name # FIXED: Matches module name
 
   policy = jsonencode({
     Version = "2012-10-17"
