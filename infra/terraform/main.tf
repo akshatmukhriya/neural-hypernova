@@ -1,4 +1,4 @@
-# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V42.0.0 ---
+# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V43.0.0 ---
 
 terraform {
   required_version = ">= 1.5.0"
@@ -22,6 +22,7 @@ resource "random_string" "id" {
 }
 
 data "aws_caller_identity" "current" {}
+data "aws_partition" "current" {}
 
 # --- 1. NETWORK ---
 module "vpc" {
@@ -88,15 +89,15 @@ module "eks" {
       instance_types = ["t3.large"]
       ami_type       = "AL2023_x86_64_STANDARD"
       
-      iam_role_name            = "KarpenterNodeRole-hypernova"
+      iam_role_name            = "KarpenterNodeRole-hypernova-${random_string.id.result}"
       iam_role_use_name_prefix = false
     }
   }
 }
 
-# --- 3. KARPENTER INFRASTRUCTURE (SQS & IAM) ---
+# --- 3. KARPENTER INFRASTRUCTURE (EXPLICIT) ---
 resource "aws_sqs_queue" "karpenter_interruption" {
-  name                      = "hypernova-${random_string.id.result}"
+  name                      = "hypernova-interruption-${random_string.id.result}"
   message_retention_seconds = 300
 }
 
@@ -104,14 +105,14 @@ module "karpenter_controller_role" {
   source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
   version = "5.33.0"
 
-  role_name = "karpenter-controller-${random_string.id.result}"
+  role_name = "karpenter-ctrl-${random_string.id.result}"
 
   attach_karpenter_controller_policy = true
   karpenter_controller_cluster_name  = "hypernova-${random_string.id.result}"
   
-  # Allow controller to handle node roles and SQS
-  karpenter_controller_node_iam_role_arns = ["arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/KarpenterNodeRole-hypernova"]
-  karpenter_controller_sqs_queue_arn      = aws_sqs_queue.karpenter_interruption.arn
+  karpenter_controller_node_iam_role_arns = [
+    "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/KarpenterNodeRole-hypernova-${random_string.id.result}"
+  ]
 
   oidc_providers = {
     main = {
@@ -121,15 +122,45 @@ module "karpenter_controller_role" {
   }
 }
 
-resource "aws_iam_role_policy" "karpenter_describe_cluster" {
-  name = "karpenter-describe-cluster-api"
+# PRECISION FIX: Attach SQS permissions directly to bypass module argument drift
+resource "aws_iam_role_policy" "karpenter_sqs_interruption" {
+  name = "karpenter-sqs-interruption"
   role = module.karpenter_controller_role.iam_role_name
 
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
       {
-        Action = ["eks:DescribeCluster", "ec2:DescribeSubnets", "ec2:DescribeSecurityGroups", "ec2:DescribeInstances", "ec2:DescribeInstanceTypes", "ec2:DescribeInstanceTypeOfferings", "ec2:DescribeAvailabilityZones", "ssm:GetParameter"]
+        Action = [
+          "sqs:DeleteMessage",
+          "sqs:GetQueueAttributes",
+          "sqs:ReceiveMessage"
+        ]
+        Effect   = "Allow"
+        Resource = aws_sqs_queue.karpenter_interruption.arn
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy" "karpenter_describe_cluster" {
+  name = "karpenter-describe-api"
+  role = module.karpenter_controller_role.iam_role_name
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = [
+          "eks:DescribeCluster",
+          "ec2:DescribeSubnets",
+          "ec2:DescribeSecurityGroups",
+          "ec2:DescribeInstances",
+          "ec2:DescribeInstanceTypes",
+          "ec2:DescribeInstanceTypeOfferings",
+          "ec2:DescribeAvailabilityZones",
+          "ssm:GetParameter"
+        ]
         Effect   = "Allow"
         Resource = "*"
       }
