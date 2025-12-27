@@ -1,4 +1,4 @@
-# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V30.0.0 ---
+# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V31.0.0 ---
 
 terraform {
   required_version = ">= 1.5.0"
@@ -41,23 +41,19 @@ module "vpc" {
 module "eks" {
   source  = "terraform-aws-modules/eks/aws"
   version = "20.24.0"
-
   cluster_name    = "hypernova-${random_string.id.result}"
   cluster_version = "1.31"
   vpc_id          = module.vpc.vpc_id
   subnet_ids      = module.vpc.private_subnets
-
-  authentication_mode                      = "API_AND_CONFIG_MAP"
+  authentication_mode = "API_AND_CONFIG_MAP"
   enable_cluster_creator_admin_permissions = true
-  cluster_endpoint_public_access           = true
-
-  create_kms_key              = false
+  cluster_endpoint_public_access = true
+  create_kms_key = false
   create_cloudwatch_log_group = false
-  cluster_encryption_config   = {}
 
   node_security_group_additional_rules = {
     ingress_ray = {
-      description = "Ray Dashboard"
+      description = "Ray Dashboard NodePort"
       protocol    = "tcp"
       from_port   = 30265
       to_port     = 30265

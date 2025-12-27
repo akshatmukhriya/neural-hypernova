@@ -13,7 +13,7 @@ spec:
         containers:
           - name: ray-head
             # THE SPEED FIX: Use base Ray image for the Head (much smaller)
-            image: rayproject/ray:2.9.0-py310 
+            image: rayproject/ray:2.9.0-py310
             ports:
               - containerPort: 8265
               - containerPort: 6379
