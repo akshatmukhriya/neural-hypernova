@@ -1,4 +1,4 @@
-# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V36.0.0 ---
+# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V37.0.0 ---
 
 terraform {
   required_version = ">= 1.5.0"
@@ -15,9 +15,12 @@ terraform {
 
 provider "aws" { region = "us-east-1" }
 
-# THE GHOST-BREAKER: 8 characters for absolute uniqueness
+# --- 1. DATA SOURCES & GLOBAL IDENTITY ---
+data "aws_caller_identity" "current" {}
+data "aws_partition" "current" {}
+
 resource "random_string" "id" {
-  length  = 8
+  length  = 4
   special = false
   upper   = false
 }
@@ -27,7 +30,7 @@ variable "runner_arn" {
   default = ""
 }
 
-# --- 1. NETWORK ---
+# --- 2. NETWORK ---
 module "vpc" {
   source  = "terraform-aws-modules/vpc/aws"
   version = "5.2.0"
@@ -41,13 +44,10 @@ module "vpc" {
   enable_nat_gateway = true
   single_nat_gateway = true 
 
-  private_subnet_tags = { 
-    "karpenter.sh/discovery" = "neural-hypernova" 
-  }
-
+  private_subnet_tags = { "karpenter.sh/discovery" = "neural-hypernova" }
 }
 
-# --- 2. THE BRAIN (EKS 1.31) ---
+# --- 3. THE BRAIN (EKS 1.31) ---
 module "eks" {
   source  = "terraform-aws-modules/eks/aws"
   version = "20.24.0"
@@ -57,13 +57,12 @@ module "eks" {
   vpc_id          = module.vpc.vpc_id
   subnet_ids      = module.vpc.private_subnets
 
-  # --- INDUSTRIAL DEFAULTS ---
-  # We remove ALL create_kms_key and cluster_encryption_config blocks.
-  # This allows the module to use its internal, verified logic.
-  
-  authentication_mode                      = "API_AND_CONFIG_MAP"
+  create_kms_key              = false
+  create_cloudwatch_log_group = false
+  authentication_mode         = "API_AND_CONFIG_MAP"
   enable_cluster_creator_admin_permissions = true
-  cluster_endpoint_public_access           = true
+
+  node_security_group_tags = { "karpenter.sh/discovery" = "neural-hypernova" }
 
   node_security_group_additional_rules = {
     ingress_ray = {
@@ -86,31 +85,27 @@ module "eks" {
 
   eks_managed_node_groups = {
     brain = {
-      name           = "brain-${random_string.id.result}"
+      name           = "brain-pool-${random_string.id.result}"
       instance_types = ["t3.large"]
       ami_type       = "AL2023_x86_64_STANDARD"
-      min_size       = 1
-      max_size       = 1
-      desired_size   = 1
+      
+      # Mandatory Role name for Karpenter V1.x Discovery
+      iam_role_name            = "KarpenterNodeRole-neural-hypernova"
+      iam_role_use_name_prefix = false
     }
-  }
-  
-  node_security_group_tags = {
-    "karpenter.sh/discovery" = "neural-hypernova"
   }
 }
 
+# --- 4. KARPENTER CONTROLLER IDENTITY (The IRSA Key) ---
 module "karpenter_controller_role" {
   source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
   version = "5.33.0"
 
   role_name = "karpenter-controller-${random_string.id.result}"
 
-  # This creates the exact policy Karpenter v1.1.1 needs
   attach_karpenter_controller_policy = true
+  karpenter_controller_cluster_name  = "hypernova-${random_string.id.result}"
   
-  # We give it permission to manage the specific Node Role we defined
-  karpenter_controller_cluster_name = module.eks.cluster_name
   karpenter_controller_node_iam_role_arns = [
     "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/KarpenterNodeRole-neural-hypernova"
   ]
@@ -123,11 +118,11 @@ module "karpenter_controller_role" {
   }
 }
 
-
-output "cluster_name"    { value = module.eks.cluster_name }
-output "vpc_id"          { value = module.vpc.vpc_id }
-output "public_subnets"  { value = module.vpc.public_subnets }
-output "random_id"       { value = random_string.id.result }
-output "private_subnet_ids" { value = module.vpc.private_subnets }
-output "node_security_group_id" { value = module.eks.node_security_group_id }
-output "karpenter_controller_role_arn" { value = module.karpenter_controller_role.iam_role_arn }
+# --- 5. OUTPUTS ---
+output "cluster_name"               { value = module.eks.cluster_name }
+output "vpc_id"                     { value = module.vpc.vpc_id }
+output "public_subnets"             { value = module.vpc.public_subnets }
+output "random_id"                  { value = random_string.id.result }
+output "karpenter_controller_role"  { value = module.karpenter_controller_role.iam_role_arn }
+output "node_security_group_id"     { value = module.eks.node_security_group_id }
+output "private_subnet_ids"         { value = module.vpc.private_subnets }

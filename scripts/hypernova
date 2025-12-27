@@ -23,61 +23,44 @@ function bootstrap() {
 
 function ignite() {
     bootstrap
-    log "🚀 Ignite Sequence: V36.0.0 (Clean Slate)"
-    
-    # Quota Recovery
-    for eip in $(aws ec2 describe-addresses --query "Addresses[?AssociationId==null].AllocationId" --output text); do
-      aws ec2 release-address --allocation-id $eip || true
-    done
-
+    log "🚀 Ignite Sequence: V37.0.0"
     cd "$TF_DIR"
-    # THE NUCLEAR CLEAN: Force Terraform to forget everything local
     rm -rf .terraform .terraform.lock.hcl
     terraform init "${INIT_OPTS[@]}" -reconfigure
+    terraform apply "${APPLY_OPTS[@]}"
     
-    log "🏗️ Synthesizing Infrastructure..."
-    terraform apply -auto-approve
-
     NAME=$(terraform output -raw cluster_name)
-    VPC_ID=$(terraform output -raw vpc_id)
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
 
-    log "💉 Phase 1: Cilium eBPF..."
+    log "🛠️ Registering Global Repos..."
     helm repo add cilium https://helm.cilium.io/
+    helm repo add kuberay https://ray-project.github.io/kuberay-helm/
     helm repo update
+
+    log "💉 Phase 1: Cilium eBPF..."
     helm upgrade --install cilium cilium/cilium --version 1.16.5 -n kube-system \
       --set kubeProxyReplacement=true --set-string debug.verbose="" --wait=false
 
-    log "💉 Phase 2: Karpenter..."
-    
-    CONTROLLER_ROLE_ARN=$(terraform output -raw karpenter_controller_role_arn)
-
+    log "💉 Phase 2: Karpenter (Sovereign IRSA)..."
+    CONTROLLER_ROLE=$(terraform output -raw karpenter_controller_role)
     helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter --version 1.1.1 \
-      --namespace karpenter --create-namespace \
-      --set "serviceAccount.annotations.eks\.amazonaws\.com/role-arn=$CONTROLLER_ROLE_ARN" \
-      --set settings.clusterName="$NAME" \
-      --set settings.interruptionQueue="$NAME" \
-      --wait
+      -n karpenter --create-namespace \
+      --set "serviceAccount.annotations.eks\.amazonaws\.com/role-arn=$CONTROLLER_ROLE" \
+      --set settings.clusterName="$NAME" --wait=false
 
     log "💉 Phase 3: KubeRay..."
-    helm repo add ray https://ray-project.github.io/kuberay-helm/
-    helm repo update
-    helm upgrade --install kuberay ray/kuberay-operator --version 1.2.2 --wait=false
+    helm upgrade --install kuberay kuberay/kuberay-operator --version 1.2.2 --wait=false
 
-    log "🏗️ Applying Forge Manifests..."
-
-    # Extract real IDs from Terraform
+    log "🏗️ Injecting Hardware IDs into NodePool..."
+    # Extract Real IDs for surgical precision
     SUBNET_IDS=$(terraform output -json private_subnet_ids | jq -r '. | join(",")')
     SG_ID=$(terraform output -raw node_security_group_id)
     
-    # Use envsubst or sed to inject real IDs into the NodeClass
-    sed -i "s/SUBNET_IDS_PLACEHOLDER/$SUBNET_IDS/" "$K8S_DIR/core/karpenter-gpu-pool.yaml"
-    sed -i "s/SG_ID_PLACEHOLDER/$SG_ID/" "$K8S_DIR/core/karpenter-gpu-pool.yaml"
+    # Create the final manifest with real IDs
+    sed "s/SUBNET_IDS_PLACEHOLDER/$SUBNET_IDS/g" "$K8S_DIR/core/karpenter-gpu-pool.yaml" | \
+    sed "s/SG_ID_PLACEHOLDER/$SG_ID/g" > "$K8S_DIR/core/active-pool.yaml"
 
-    # # Force delete to clear any 'NotReady' status from previous runs
-    # kubectl delete -f "$K8S_DIR/core/karpenter-gpu-pool.yaml" --ignore-not-found
-    # sleep 30
-    kubectl apply -f "$K8S_DIR/core/karpenter-gpu-pool.yaml"
+    kubectl apply -f "$K8S_DIR/core/active-pool.yaml"
     kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"
     log "✅ SYSTEM ARMED."
 }

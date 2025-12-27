@@ -11,7 +11,6 @@ spec:
           values: ["spot", "on-demand"]
         - key: "node.kubernetes.io/instance-type"
           operator: In
-          # Added g4dn as a fallback to ensure you get a node even if G5 is out of stock
           values: ["g5.2xlarge", "g4dn.xlarge", "p4d.24xlarge"]
         - key: "kubernetes.io/arch"
           operator: In
@@ -22,34 +21,17 @@ spec:
         name: default
   limits:
     cpu: 1000
-  disruption:
-    consolidationPolicy: WhenEmpty
-    consolidateAfter: 30s
 ---
 apiVersion: karpenter.k8s.aws/v1
 kind: EC2NodeClass
 metadata:
   name: default
 spec:
-  # AL2023 is the modern standard for EKS 1.31
   amiFamily: AL2023
-  
-  # This role is created by the EKS module for the 'brain' group
-  # We reuse it to ensure the nodes have permission to join the cluster
   role: "KarpenterNodeRole-neural-hypernova"
-  
-  # THE FIX: Finding subnets and SGs via the static tag we set in Terraform
-  # subnetSelectorTerms:
-  #   - tags:
-  #       karpenter.sh/discovery: "neural-hypernova"
-  # securityGroupSelectorTerms:
-  #   - tags:
-  #       karpenter.sh/discovery: "neural-hypernova"
   subnetSelectorTerms:
     - id: "SUBNET_IDS_PLACEHOLDER"
   securityGroupSelectorTerms:
-    - id: "SG_ID_PLACEHOLDER"     
-      
-  # THE FIX: Mandatory for Karpenter v1.x
+    - id: "SG_ID_PLACEHOLDER"
   amiSelectorTerms:
     - alias: al2023@latest
