@@ -1,10 +1,10 @@
-# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V16.0.0 ---
+# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V11.0.0 ---
 
 terraform {
   required_version = ">= 1.5.0"
   required_providers {
-    aws    = { source = "hashicorp/aws", version = "~> 5.0" }
-    http   = { source = "hashicorp/http", version = "~> 3.0" }
+    aws  = { source = "hashicorp/aws", version = "~> 5.0" }
+    http = { source = "hashicorp/http", version = "~> 3.0" }
     random = { source = "hashicorp/random", version = "~> 3.0" }
   }
   backend "s3" {
@@ -26,6 +26,7 @@ data "http" "lb_policy" {
   url = "https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/main/docs/install/iam_policy.json"
 }
 
+# --- 1. NETWORK ---
 module "vpc" {
   source  = "terraform-aws-modules/vpc/aws"
   version = "5.2.0"
@@ -46,6 +47,7 @@ module "vpc" {
   }
 }
 
+# --- 2. THE BRAIN (EKS) ---
 module "eks" {
   source  = "terraform-aws-modules/eks/aws"
   version = "20.24.0"
@@ -65,13 +67,31 @@ module "eks" {
 
   node_security_group_enable_recommended_rules = true
   node_security_group_additional_rules = {
-    ingress_vpc_all = {
+    ingress_all_vpc = {
       description = "VPC Internal Handshake"
       protocol    = "-1"
       from_port   = 0
       to_port     = 0
       type        = "ingress"
       cidr_blocks = ["10.0.0.0/16"]
+    }
+    # THE UNICORN FIX: Open Webhook Port to the World
+    # This ensures the EKS Control Plane (managed by AWS) can reach the HostNetwork pod
+    ingress_webhook_public = {
+      description = "Allow LBC Webhook Access"
+      protocol    = "tcp"
+      from_port   = 9443
+      to_port     = 9443
+      type        = "ingress"
+      cidr_blocks = ["0.0.0.0/0"]
+    }
+    ingress_ray = {
+      description = "Ray Dashboard Public"
+      protocol    = "tcp"
+      from_port   = 8265
+      to_port     = 8265
+      type        = "ingress"
+      cidr_blocks = ["0.0.0.0/0"]
     }
   }
 
@@ -86,6 +106,7 @@ module "eks" {
   }
 }
 
+# --- 3. IAM ---
 resource "aws_iam_policy" "lbc" {
   name        = "AWSLBCPolicy-${random_string.id.result}"
   policy      = data.http.lb_policy.response_body
@@ -112,4 +133,3 @@ resource "aws_iam_role_policy_attachment" "lbc" {
 output "cluster_name" { value = module.eks.cluster_name }
 output "vpc_id"       { value = module.vpc.vpc_id }
 output "lb_role_arn"  { value = aws_iam_role.lbc.arn }
-output "region"       { value = "us-east-1" }

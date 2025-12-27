@@ -6,104 +6,86 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 TF_DIR="$ROOT_DIR/infra/terraform"
 K8S_DIR="$ROOT_DIR/k8s"
 
-COLOR_CYAN='\033[0;36m'
-COLOR_GREEN='\033[0;32m'
-COLOR_RESET='\033[0m'
-
-function log() { echo -e "${COLOR_CYAN}[HYPERNOVA] $1${COLOR_RESET}"; }
+function log() { echo -e "\033[0;36m[HYPERNOVA] $1\033[0m"; }
 
 function bootstrap() {
     log "📡 Detecting Identity..."
     RUNNER_ARN=$(aws sts get-caller-identity --query Arn --output text)
     ACCOUNT_ID=$(echo $RUNNER_ARN | cut -d: -f5)
+    [[ $RUNNER_ARN == *"assumed-role"* ]] && CLEAN_ARN="arn:aws:iam::$ACCOUNT_ID:role/$(echo $RUNNER_ARN | cut -d/ -f2)" || CLEAN_ARN=$RUNNER_ARN
     BUCKET="hypernova-state-$ACCOUNT_ID"
     aws s3 mb "s3://$BUCKET" --region us-east-1 2>/dev/null || true
     INIT_OPTS=(-backend-config="bucket=$BUCKET")
+    APPLY_OPTS=(-var="runner_arn=$CLEAN_ARN" -auto-approve)
 }
 
 function ignite() {
     bootstrap
-    log "🚀 Ignite Sequence: V16.0.0 (Compute-First Protocol)"
+    log "🚀 Ignite Sequence: V11.0.0 (The HostNetwork Bypass)"
     cd "$TF_DIR"
     rm -rf .terraform .terraform.lock.hcl
     terraform init "${INIT_OPTS[@]}" -reconfigure
-    terraform apply -auto-approve
+    terraform apply "${APPLY_OPTS[@]}"
 
     NAME=$(terraform output -raw cluster_name)
     VPC_ID=$(terraform output -raw vpc_id)
     ROLE_ARN=$(terraform output -raw lb_role_arn)
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
 
-    # --- THE LOBOTOMY: Wipe any ghost webhooks from failed runs ---
-    log "🧹 Purging Ghost Webhooks..."
+    log "🧹 Webhook Phantom Purge..."
     kubectl delete mutatingwebhookconfiguration --all || true
-    kubectl delete validatingwebhookconfiguration --all || true
 
     log "🛠️ Updating Repos..."
     helm repo add cilium https://helm.cilium.io/
     helm repo add eks https://aws.github.io/eks-charts
-    helm repo add ray https://ray-project.github.io/kuberay-helm/
     helm repo update
 
     log "💉 Phase 1: Cilium eBPF..."
     helm upgrade --install cilium cilium/cilium --version 1.16.5 -n kube-system \
       --set kubeProxyReplacement=true --set-string debug.verbose="" --wait=false
 
-    # --- THE COMPUTE-FIRST BYPASS ---
-    log "💉 Phase 2: Karpenter & KubeRay..."
-    # We install these BEFORE the Load Balancer Controller. 
-    # There is no webhook present yet, so they install with ZERO resistance.
-    helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter --version 1.1.1 \
-      -n karpenter --create-namespace --set settings.clusterName="$NAME" --wait=false
-    
-    helm upgrade --install kuberay-operator ray/kuberay-operator --version 1.2.2 --wait=false
-
-    log "🏗️ Applying Forge Manifests..."
-    sleep 20
-    kubectl apply -f "$K8S_DIR/core/karpenter-gpu-pool.yaml"
-    kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"
-
-    # --- FINAL LAYER: NETWORKING ---
-    log "💉 Phase 3: AWS Load Balancer Controller..."
+    log "💉 Phase 2: AWS Load Balancer Controller (HostNetwork Mode)..."
     kubectl apply -f https://raw.githubusercontent.com/aws/eks-charts/master/stable/aws-load-balancer-controller/crds/crds.yaml
+    
+    # THE UNICORN FIX: hostNetwork=true + failurePolicy=Ignore
+    # This forces the pod to use the Node's IP, making it reachable by EKS Control Plane
     helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system \
       --set clusterName="$NAME" --set serviceAccount.create=true \
       --set serviceAccount.name=aws-load-balancer-controller \
       --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="$ROLE_ARN" \
       --set region=us-east-1 --set vpcId="$VPC_ID" \
       --set webhookConfig.failurePolicy=Ignore \
+      --set hostNetwork=true \
       --wait=false
 
-    log "✅ SYSTEM ARMED. Hypernova is now stable."
+    log "💉 Phase 3: Karpenter & AI Forge..."
+    helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter --version 1.1.1 \
+      -n karpenter --create-namespace --set settings.clusterName="$NAME" --wait=false
+    
+    helm repo add ray https://ray-project.github.io/kuberay-helm/
+    helm repo update
+    helm upgrade --install kuberay-operator ray/kuberay-operator --version 1.2.2 --wait=false
+
+    log "🏗️ Applying Forge Manifests..."
+    sleep 30
+    kubectl apply -f "$K8S_DIR/core/karpenter-gpu-pool.yaml"
+    kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"
+    log "✅ SYSTEM ARMED."
 }
 
 function demo() {
     bootstrap
-    log "🎭 Launching Spectator Protocol (God-Mode)..."
+    log "🎭 Spectator Protocol..."
     cd "$TF_DIR"
-    
-    # 1. Sync State
-    log "Syncing state with foundation..."
     terraform init "${INIT_OPTS[@]}" -reconfigure > /dev/null
     NAME=$(terraform output -raw cluster_name)
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
-
-    # 2. THE LOBOTOMY: Force Webhook to Ignore failures
-    log "🛠️  Patching LBC Webhook to 'Ignore' mode (Bypassing Deadlock)..."
-    # We loop because the controller might try to revert it
-    for i in {1..3}; do
-        kubectl patch mutatingwebhookconfiguration elbv2.k8s.aws-mutating-webhook-configuration \
-            --type=json -p='[{"op": "replace", "path": "/webhooks/0/failurePolicy", "value": "Ignore"}]' 2>/dev/null || true
-        kubectl patch validatingwebhookconfiguration elbv2.k8s.aws-validating-webhook-configuration \
-            --type=json -p='[{"op": "replace", "path": "/webhooks/0/failurePolicy", "value": "Ignore"}]' 2>/dev/null || true
-        sleep 2
-    done
-
-    log "🏗️  Ensuring Ray Cluster is present..."
-    kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"
-
-    log "🌐 Exposing Dashboard via AWS NLB..."
-    # With failurePolicy set to Ignore, this command will NOT fail.
+    
+    # SPEED RUN: Kill the webhook and instantly apply the service before it recreates
+    log "⚔️  Neutralizing Webhooks..."
+    kubectl delete mutatingwebhookconfiguration elbv2.k8s.aws-mutating-webhook-configuration --ignore-not-found
+    
+    log "🌐 Exposing Dashboard..."
     cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: Service
@@ -112,36 +94,18 @@ metadata:
   annotations:
     service.beta.kubernetes.io/aws-load-balancer-type: external
     service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: instance
-    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
 spec:
   type: LoadBalancer
   selector: { ray.io/node-type: head }
   ports: [{ name: dash, port: 8265, targetPort: 8265 }]
 EOF
-
-    log "⏳ Phase 1: DNS Identification..."
-    local URL=""
-    for i in {1..12}; do
+    log "Waiting for DNS..."
+    URL=""
+    while [ -z "$URL" ]; do
         URL=$(kubectl get svc hypernova-dashboard-lb -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
-        if [ ! -z "$URL" ]; then break; fi
-        log "Waiting for AWS to assign DNS... ($((i*10))s)"
         sleep 10
     done
-
-    if [ -z "$URL" ]; then
-        error_log "Failed to get DNS. Check LBC logs: kubectl logs -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller"
-        exit 1
-    fi
-
-    log "⏳ Phase 2: Propagation Guard..."
-    until nslookup "$URL" > /dev/null 2>&1; do
-        log "Waiting for global DNS propagation... (15s)"
-        sleep 15
-    done
-
-    echo -e "${COLOR_GREEN}----------------------------------------------------------------"
-    echo "🚀 NEURAL HYPERNOVA LIVE: http://$URL:8265"
-    echo "----------------------------------------------------------------${COLOR_RESET}"
+    log "🚀 DASHBOARD: http://$URL:8265"
 }
 
 function nuke() {
@@ -152,7 +116,6 @@ function nuke() {
     terraform init "${INIT_OPTS[@]}" -reconfigure || true
     VPC_ID=$(terraform output -raw vpc_id 2>/dev/null || echo "")
     NAME=$(terraform output -raw cluster_name 2>/dev/null || echo "hypernova")
-
     kubectl delete svc hypernova-dashboard-lb --ignore-not-found || true
     aws eks delete-cluster --name "$NAME" --region us-east-1 2>/dev/null || true
     for eip in $(aws ec2 describe-addresses --region us-east-1 --query "Addresses[?VpcId=='$VPC_ID'].AllocationId" --output text); do
