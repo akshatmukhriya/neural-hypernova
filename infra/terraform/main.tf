@@ -1,4 +1,4 @@
-# --- NEURAL HYPERNOVA: ATOMIC INFRASTRUCTURE V11.0.0 ---
+# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V12.0.0 ---
 
 terraform {
   required_version = ">= 1.5.0"
@@ -19,14 +19,12 @@ variable "runner_arn" {
   default = ""
 }
 
-# --- 1. DATA SOURCES ---
 data "aws_caller_identity" "current" {}
-data "aws_partition" "current" {}
 data "http" "lb_policy" {
   url = "https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/main/docs/install/iam_policy.json"
 }
 
-# --- 2. NETWORK ---
+# --- 1. NETWORK ---
 module "vpc" {
   source  = "terraform-aws-modules/vpc/aws"
   version = "5.2.0"
@@ -47,6 +45,41 @@ module "vpc" {
   }
 }
 
+# --- 2. DECOUPLED NODE SECURITY GROUP (Breaks the Cycle) ---
+resource "aws_security_group" "nodes" {
+  name        = "hypernova-node-sg"
+  description = "Manual SG to prevent Terraform circular dependencies"
+  vpc_id      = module.vpc.vpc_id
+
+  # Rule: Internal VPC All (Control Plane, eBPF, Webhooks)
+  ingress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["10.0.0.0/16"]
+  }
+
+  # Rule: Ray Dashboard Public
+  ingress {
+    from_port   = 8265
+    to_port     = 8265
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name                                     = "hypernova-node-sg"
+    "kubernetes.io/cluster/neural-hypernova" = "owned"
+  }
+}
+
 # --- 3. THE BRAIN (EKS) ---
 module "eks" {
   source  = "terraform-aws-modules/eks/aws"
@@ -61,23 +94,13 @@ module "eks" {
   authentication_mode         = "API_AND_CONFIG_MAP"
   cluster_endpoint_public_access = true
 
-  enable_cluster_creator_admin_permissions = true
-
-  node_security_group_enable_recommended_rules = true
-  node_security_group_additional_rules = {
-    ingress_all_vpc = {
-      description = "Internal VPC access"
-      protocol    = "-1"
-      from_port   = 0
-      to_port     = 0
-      type        = "ingress"
-      cidr_blocks = ["10.0.0.0/16"]
-    }
-  }
+  # THE BYPASS: Use our manual Security Group
+  create_node_security_group = false
+  node_security_group_id     = aws_security_group.nodes.id
 
   eks_managed_node_groups = {
     brain = {
-      instance_types = ["t3.large"] # 8GB RAM to ensure no OOM join failures
+      instance_types = ["t3.large"]
       ami_type       = "AL2023_x86_64_STANDARD"
       min_size       = 1
       max_size       = 1
@@ -98,29 +121,21 @@ module "eks" {
   }
 }
 
-# --- 4. RAW IAM RESOURCES (Fixed: No nested modules) ---
-
-# Load Balancer Controller Policy
+# --- 4. IAM FOR LBC ---
 resource "aws_iam_policy" "lb_controller" {
   name   = "AWSLBCPolicy-Hypernova"
   policy = data.http.lb_policy.response_body
 }
 
-# Load Balancer Controller Role with OIDC Trust
 resource "aws_iam_role" "lb_controller" {
   name = "lb-controller-hypernova"
-
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Action = "sts:AssumeRoleWithWebIdentity"
       Effect = "Allow"
       Principal = { Federated = module.eks.oidc_provider_arn }
-      Condition = {
-        StringEquals = {
-          "${module.eks.oidc_provider}:sub" = "system:serviceaccount:kube-system:aws-load-balancer-controller"
-        }
-      }
+      Action = "sts:AssumeRoleWithWebIdentity"
+      Condition = { StringEquals = { "${module.eks.oidc_provider}:sub" = "system:serviceaccount:kube-system:aws-load-balancer-controller" }}
     }]
   })
 }
@@ -130,7 +145,6 @@ resource "aws_iam_role_policy_attachment" "lb_controller_attach" {
   role       = aws_iam_role.lb_controller.name
 }
 
-# --- 5. OUTPUTS ---
 output "cluster_name" { value = module.eks.cluster_name }
 output "region"       { value = "us-east-1" }
 output "vpc_id"       { value = module.vpc.vpc_id }

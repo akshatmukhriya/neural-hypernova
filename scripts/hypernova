@@ -6,25 +6,13 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 TF_DIR="$ROOT_DIR/infra/terraform"
 K8S_DIR="$ROOT_DIR/k8s"
 
-COLOR_CYAN='\033[0;36m'
-COLOR_GREEN='\033[0;32m'
-COLOR_RESET='\033[0m'
-
-function log() { echo -e "${COLOR_CYAN}[HYPERNOVA] $1${COLOR_RESET}"; }
+function log() { echo -e "\033[0;36m[HYPERNOVA] $1\033[0m"; }
 
 function bootstrap() {
     log "📡 Detecting Cloud Identity..."
     RUNNER_ARN=$(aws sts get-caller-identity --query Arn --output text)
     ACCOUNT_ID=$(echo $RUNNER_ARN | cut -d: -f5)
-    
-    # Clean assumed-role for EKS entry
-    if [[ $RUNNER_ARN == *"assumed-role"* ]]; then
-        ROLE_NAME=$(echo $RUNNER_ARN | cut -d/ -f2)
-        CLEAN_ARN="arn:aws:iam::$ACCOUNT_ID:role/$ROLE_NAME"
-    else
-        CLEAN_ARN=$RUNNER_ARN
-    fi
-
+    [[ $RUNNER_ARN == *"assumed-role"* ]] && CLEAN_ARN="arn:aws:iam::$ACCOUNT_ID:role/$(echo $RUNNER_ARN | cut -d/ -f2)" || CLEAN_ARN=$RUNNER_ARN
     BUCKET="hypernova-state-$ACCOUNT_ID"
     aws s3 mb "s3://$BUCKET" --region us-east-1 2>/dev/null || true
     INIT_OPTS=(-backend-config="bucket=$BUCKET")
@@ -33,12 +21,15 @@ function bootstrap() {
 
 function ignite() {
     bootstrap
-    log "🚀 Igniting V11.0.0 (Atomic Standard)"
+    log "🚀 Igniting V12.0.0 (Decoupled & Indestructible)..."
     cd "$TF_DIR"
-    
-    # Hard purge to ensure init is fresh
     rm -rf .terraform .terraform.lock.hcl
     terraform init "${INIT_OPTS[@]}" -reconfigure
+    
+    # REPAIR PROTOCOL: Refresh state to clear 'deposed' resource cycles
+    log "🛠️  Repairing state dependencies..."
+    terraform refresh "${APPLY_OPTS[@]}" || true
+    
     terraform apply "${APPLY_OPTS[@]}"
 
     NAME=$(terraform output -raw cluster_name)
@@ -46,7 +37,10 @@ function ignite() {
     ROLE_ARN=$(terraform output -raw lb_role_arn)
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
 
-    log "🛠️ Registering Global Repos..."
+    # --- LOBOTOMY: Wipe webhooks to clear path ---
+    kubectl delete mutatingwebhookconfiguration --all || true
+
+    log "🛠️ Registering Repos..."
     helm repo add cilium https://helm.cilium.io/
     helm repo add eks https://aws.github.io/eks-charts
     helm repo add ray https://ray-project.github.io/kuberay-helm/
@@ -56,13 +50,12 @@ function ignite() {
     helm upgrade --install cilium cilium/cilium --version 1.16.5 -n kube-system \
       --set kubeProxyReplacement=true --set-string debug.verbose="" --wait=false
 
-    log "💉 Phase 2: Karpenter & KubeRay..."
+    log "💉 Phase 2: Karpenter & Ray..."
     helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter --version 1.1.1 \
       -n karpenter --create-namespace --set settings.clusterName="$NAME" --wait=false
-    helm upgrade --install kuberay-operator ray/kuberay-operator --version 1.2.2 --wait=false
+    helm upgrade --install kuberay ray/kuberay-operator --version 1.2.2 --wait=false
 
     log "💉 Phase 3: AWS Load Balancer Controller..."
-    kubectl delete mutatingwebhookconfiguration elbv2.k8s.aws-mutating-webhook-configuration --ignore-not-found
     kubectl apply -f https://raw.githubusercontent.com/aws/eks-charts/master/stable/aws-load-balancer-controller/crds/crds.yaml
     helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system \
       --set clusterName="$NAME" --set serviceAccount.create=true \
@@ -71,9 +64,12 @@ function ignite() {
       --set region=us-east-1 --set vpcId="$VPC_ID" \
       --set webhookConfig.failurePolicy=Ignore --wait=false
 
-    log "✅ SYSTEM ARMED. Check nodes with 'kubectl get nodes'."
+    log "🏗️ Finalizing AI Forge..."
+    sleep 30
+    kubectl apply -f "$K8S_DIR/core/karpenter-gpu-pool.yaml"
+    kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"
+    log "✅ SYSTEM ARMED."
 }
-
 function demo() {
     bootstrap
     log "🎭 Launching Spectator..."
