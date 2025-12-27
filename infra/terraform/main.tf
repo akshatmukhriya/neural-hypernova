@@ -1,4 +1,4 @@
-# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V22.1.0 ---
+# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V23.0.0 ---
 
 terraform {
   required_version = ">= 1.5.0"
@@ -17,13 +17,12 @@ provider "aws" {
   region = "us-east-1"
 }
 
-# --- 1. GLOBAL VARIABLES (THE FIX) ---
+# --- 1. GLOBAL VARIABLES ---
 variable "runner_arn" {
   type    = string
   default = ""
 }
 
-# THE GHOST-BREAKER
 resource "random_string" "id" {
   length  = 4
   special = false
@@ -62,7 +61,7 @@ resource "aws_security_group" "forge_sg" {
   }
 
   ingress {
-    from_port   = 30265 # NodePort for Dashboard
+    from_port   = 30265 # NodePort for Dashboard Bypass
     to_port     = 30265
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
@@ -80,7 +79,7 @@ resource "aws_security_group" "forge_sg" {
   }
 }
 
-# --- 4. EKS CLUSTER ---
+# --- 4. EKS CLUSTER (1.31) ---
 module "eks" {
   source  = "terraform-aws-modules/eks/aws"
   version = "20.24.0"
@@ -96,6 +95,9 @@ module "eks" {
 
   authentication_mode            = "API_AND_CONFIG_MAP"
   cluster_endpoint_public_access = true
+
+  # THE IDENTITY FIX: Enable this flag and REMOVE the access_entries block
+  # This grants the Runner (Cluster Creator) full admin rights natively.
   enable_cluster_creator_admin_permissions = true
 
   eks_managed_node_groups = {
@@ -103,18 +105,6 @@ module "eks" {
       instance_types = ["t3.large"]
       ami_type       = "AL2023_x86_64_STANDARD"
       vpc_security_group_ids = [aws_security_group.forge_sg.id]
-    }
-  }
-
-  access_entries = {
-    runner = {
-      principal_arn = var.runner_arn
-      policy_associations = {
-        admin = {
-          policy_arn = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
-          access_scope = { type = "cluster" }
-        }
-      }
     }
   }
 }
