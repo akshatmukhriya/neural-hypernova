@@ -1,4 +1,4 @@
-# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V34.0.0 ---
+# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V35.0.0 ---
 
 terraform {
   required_version = ">= 1.5.0"
@@ -41,6 +41,7 @@ module "vpc" {
 
   enable_nat_gateway = true
   single_nat_gateway = true 
+  public_subnet_tags = { "kubernetes.io/role/elb" = 1 }
 }
 
 # --- 2. THE BRAIN (EKS 1.31) ---
@@ -53,21 +54,17 @@ module "eks" {
   vpc_id          = module.vpc.vpc_id
   subnet_ids      = module.vpc.private_subnets
 
-  # --- THE ULTIMATE BYPASS FIX ---
-  # Setting this to an empty map {} is NOT enough; we must nullify the attribute 
-  # that triggers the internal module bug.
-  create_kms_key              = false
-  cluster_encryption_config   = {} 
-  create_cloudwatch_log_group = false
-
-  authentication_mode                      = "API_AND_CONFIG_MAP"
+  # --- BYPASSING MODULE BUGS ---
+  # We remove ALL encryption/KMS/Log blocks to ensure the module doesn't crash.
+  create_kms_key               = false
+  create_cloudwatch_log_group  = false
+  enable_irsa                  = true
+  authentication_mode          = "API_AND_CONFIG_MAP"
   enable_cluster_creator_admin_permissions = true
-  cluster_endpoint_public_access           = true
 
-  # Unified Security Rules
   node_security_group_additional_rules = {
     ingress_ray = {
-      description = "Ray Dashboard"
+      description = "Ray Dashboard NodePort"
       protocol    = "tcp"
       from_port   = 30265
       to_port     = 30265

@@ -24,10 +24,9 @@ function bootstrap() {
 
 function ignite() {
     bootstrap
-    log "🚀 Ignite Sequence: V34.0.0"
+    log "🚀 Ignite Sequence: V35.0.0 (Metadata Purge Protocol)"
     
-    # Clean NAT IP Quota
-    log "🧹 Freeing IP Debris..."
+    # Quota Recovery
     for eip in $(aws ec2 describe-addresses --query "Addresses[?AssociationId==null].AllocationId" --output text); do
       aws ec2 release-address --allocation-id $eip || true
     done
@@ -52,11 +51,16 @@ function ignite() {
     helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter --version 1.1.1 \
       -n karpenter --create-namespace --set settings.clusterName="$NAME" --wait=false
 
-    log "💉 Phase 3: KubeRay..."
+    log "💉 Phase 3: KubeRay (Metadata Ghost Purge)..."
+    # THE SURGICAL FIX: Purge conflicting service account and metadata
+    kubectl delete sa kuberay-operator -n default --ignore-not-found
+    kubectl delete clusterrole kuberay-operator --ignore-not-found
+    kubectl delete clusterrolebinding kuberay-operator --ignore-not-found
+    
     helm upgrade --install kuberay kuberay/kuberay-operator --version 1.2.2 --wait=false
 
     log "🏗️ Applying Forge Manifests..."
-    sleep 20
+    sleep 30
     kubectl apply -f "$K8S_DIR/core/karpenter-gpu-pool.yaml"
     kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"
     log "✅ FORGE INITIALIZED."
@@ -64,17 +68,16 @@ function ignite() {
 
 function demo() {
     bootstrap
-    log "🎭 Launching Spectator Protocol..."
+    log "🎭 Launching Spectator Protocol (Cloud-Native Bypass)..."
     cd "$TF_DIR"
     terraform init "${INIT_OPTS[@]}" -reconfigure > /dev/null
-    
     NAME=$(terraform output -raw cluster_name)
     VPC_ID=$(terraform output -raw vpc_id)
     RAND_ID=$(terraform output -raw random_id)
     SUBNETS=$(terraform output -json public_subnets | jq -r '.[]' | paste -sd " " -)
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
 
-    log "🌐 Step 1: Deploying Dashboard NodePort..."
+    log "🌐 Ensuring Dashboard NodePort..."
     cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: Service
@@ -86,9 +89,9 @@ spec:
   ports: [{ nodePort: 30265, port: 8265, targetPort: 8265 }]
 EOF
 
-    log "⏳ Phase 0: Waiting for Pod Readiness..."
+    log "⏳ Phase 0: Waiting for Ray Pod..."
     until kubectl get pod -l ray.io/node-type=head | grep "1/1" > /dev/null 2>&1; do
-        log "Ray Pod is warming up..."
+        log "Pod is warming up..."
         sleep 15
     done
 
@@ -111,6 +114,7 @@ function nuke() {
     rm -rf .terraform .terraform.lock.hcl
     terraform init "${INIT_OPTS[@]}" -reconfigure || true
     VPC_ID=$(terraform output -raw vpc_id 2>/dev/null || echo "")
+    RAND_ID=$(terraform output -raw random_id 2>/dev/null || echo "final")
     NAME=$(terraform output -raw cluster_name 2>/dev/null || echo "hypernova")
 
     LB_ARNS=$(aws elbv2 describe-load-balancers --query "LoadBalancers[?contains(LoadBalancerName, 'hyp-lb')].LoadBalancerArn" --output text)
