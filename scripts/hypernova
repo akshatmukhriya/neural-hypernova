@@ -58,6 +58,17 @@ function ignite() {
     helm upgrade --install kuberay ray/kuberay-operator --version 1.2.2 --wait=false
 
     log "🏗️ Applying Forge Manifests..."
+
+    # Extract real IDs from Terraform
+    SUBNET_IDS=$(terraform output -json private_subnet_ids | jq -r '. | join(",")')
+    SG_ID=$(terraform output -raw node_security_group_id)
+    
+    # Use envsubst or sed to inject real IDs into the NodeClass
+    sed -i "s/SUBNET_IDS_PLACEHOLDER/$SUBNET_IDS/" "$K8S_DIR/core/karpenter-gpu-pool.yaml"
+    sed -i "s/SG_ID_PLACEHOLDER/$SG_ID/" "$K8S_DIR/core/karpenter-gpu-pool.yaml"
+
+    # Force delete to clear any 'NotReady' status from previous runs
+    kubectl delete -f "$K8S_DIR/core/karpenter-gpu-pool.yaml" --ignore-not-found
     sleep 30
     kubectl apply -f "$K8S_DIR/core/karpenter-gpu-pool.yaml"
     kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"

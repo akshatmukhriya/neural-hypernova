@@ -40,6 +40,11 @@ module "vpc" {
 
   enable_nat_gateway = true
   single_nat_gateway = true 
+
+  private_subnet_tags = { 
+    "karpenter.sh/discovery" = "neural-hypernova" 
+  }
+
 }
 
 # --- 2. THE BRAIN (EKS 1.31) ---
@@ -89,9 +94,15 @@ module "eks" {
       desired_size   = 1
     }
   }
+  
+  node_security_group_tags = {
+    "karpenter.sh/discovery" = "neural-hypernova"
+  }
 }
 
 output "cluster_name"    { value = module.eks.cluster_name }
 output "vpc_id"          { value = module.vpc.vpc_id }
 output "public_subnets"  { value = module.vpc.public_subnets }
 output "random_id"       { value = random_string.id.result }
+output "private_subnet_ids" { value = module.vpc.private_subnets }
+output "node_security_group_id" { value = module.eks.node_security_group_id }
