@@ -24,29 +24,32 @@ function bootstrap() {
 
 function ignite() {
     bootstrap
-    log "🚀 Ignite Sequence: V29.0.0 (Unified Success)"
+    log "🚀 Ignite Sequence: V30.0.0 (The Final Strike)"
     cd "$TF_DIR"
     rm -rf .terraform .terraform.lock.hcl
     terraform init "${INIT_OPTS[@]}" -reconfigure
     terraform apply "${APPLY_OPTS[@]}"
-
     NAME=$(terraform output -raw cluster_name)
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
 
-    log "💉 Injecting Cilium..."
+    log "💉 Injecting Cilium & Karpenter..."
     helm repo add cilium https://helm.cilium.io/
     helm repo update
     helm upgrade --install cilium cilium/cilium --version 1.16.5 -n kube-system \
       --set kubeProxyReplacement=true --set-string debug.verbose="" --wait=false
 
-    log "💉 Injecting Karpenter..."
     helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter --version 1.1.1 \
       -n karpenter --create-namespace --set settings.clusterName="$NAME" --wait=false
 
-    log "🏗️ Applying AI Manifests..."
+    helm repo add ray https://ray-project.github.io/kuberay-helm/
+    helm repo update
+    helm upgrade --install kuberay kuberay/kuberay-operator --version 1.2.2 --wait=false
+
+    log "🏗️ Pre-applying Manifests..."
+    sleep 20
     kubectl apply -f "$K8S_DIR/core/karpenter-gpu-pool.yaml"
     kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"
-    log "✅ FORGE INITIALIZED."
+    log "✅ SYSTEM ARMED."
 }
 
 function demo() {
@@ -54,14 +57,13 @@ function demo() {
     log "🎭 Launching Spectator Protocol..."
     cd "$TF_DIR"
     terraform init "${INIT_OPTS[@]}" -reconfigure > /dev/null
-    
     NAME=$(terraform output -raw cluster_name)
     VPC_ID=$(terraform output -raw vpc_id)
     RAND_ID=$(terraform output -raw random_id)
     SUBNETS=$(terraform output -json public_subnets | jq -r '.[]' | paste -sd " " -)
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
 
-    log "🌐 Step 1: Deploying Dashboard NodePort..."
+    log "🌐 Ensuring Dashboard NodePort..."
     cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: Service
@@ -73,56 +75,44 @@ spec:
   ports: [{ nodePort: 30265, port: 8265, targetPort: 8265 }]
 EOF
 
-    log "⏳ Phase 0: Waiting for Nodes and Ray Pod..."
-    kubectl wait --for=condition=Ready pod -l ray.io/node-type=head --timeout=600s
+    log "⏳ Phase 0: Waiting for Ray Pod (With Diagnostics)..."
+    # Polling wait with events dump on failure
+    local ATTEMPTS=0
+    until kubectl get pod -l ray.io/node-type=head | grep "1/1" > /dev/null 2>&1 || [ $ATTEMPTS -eq 30 ]; do
+        log "Waiting for Pod... (Attempt $((ATTEMPTS+1))/30)"
+        [ $((ATTEMPTS % 5)) -eq 0 ] && kubectl get nodes && kubectl get pod -l ray.io/node-type=head
+        sleep 10
+        ATTEMPTS=$((ATTEMPTS+1))
+    done
 
-    log "🌐 Step 2: Provisioning Industrial NLB..."
-    LB_NAME="hyper-lb-$RAND_ID"
+    if [ $ATTEMPTS -eq 30 ]; then
+        log "❌ Pod timed out. Dumping Cluster Events..."
+        kubectl get events --sort-by='.lastTimestamp' | tail -n 20
+        exit 1
+    fi
+
+    log "🌐 Phase 1: Provisioning Industrial NLB..."
+    LB_NAME="hyp-lb-$RAND_ID"
     LB_ARN=$(aws elbv2 create-load-balancer --name "$LB_NAME" --subnets $SUBNETS --type network --query "LoadBalancers[0].LoadBalancerArn" --output text)
+    TG_ARN=$(aws elbv2 create-target-group --name "hyp-tg-$RAND_ID" --protocol TCP --port 30265 --vpc-id "$VPC_ID" --target-type instance --query "TargetGroups[0].TargetGroupArn" --output text)
     
-    log "🌐 Step 3: Configuring Target Group..."
-    TG_ARN=$(aws elbv2 create-target-group --name "hyper-tg-$RAND_ID" --protocol TCP --port 30265 --vpc-id "$VPC_ID" --target-type instance --query "TargetGroups[0].TargetGroupArn" --output text)
-    
-    log "🌐 Step 4: Registering Compute Nodes..."
     INSTANCES=$(aws ec2 describe-instances --filters "Name=tag:kubernetes.io/cluster/$NAME,Values=owned" "Name=instance-state-name,Values=running" --query "Reservations[*].Instances[*].InstanceId" --output text)
-    for ins in $INSTANCES; do
-        aws elbv2 register-targets --target-group-arn "$TG_ARN" --targets Id="$ins" || true
-    done
-
-    log "🌐 Step 5: Finalizing Listener..."
-    aws elbv2 create-listener --load-balancer-arn "$LB_ARN" --protocol TCP --port 8265 --default-actions Type=forward,TargetGroupArn="$TG_ARN" 2>/dev/null || true
-
-    log "⏳ Phase 3: Hardware Verification (Waiting for 'healthy' status)..."
-    local HEALTH="unhealthy"
-    while [ "$HEALTH" != "healthy" ]; do
-        HEALTH=$(aws elbv2 describe-target-health --target-group-arn "$TG_ARN" --query "TargetHealthDescriptions[0].TargetHealth.State" --output text 2>/dev/null || echo "initializing")
-        if [ "$HEALTH" == "healthy" ]; then break; fi
-        log "Hardware Check: $HEALTH... (warming up)"
-        sleep 15
-    done
+    for ins in $INSTANCES; do aws elbv2 register-targets --target-group-arn "$TG_ARN" --targets Id="$ins" || true; done
+    aws elbv2 create-listener --load-balancer-arn "$LB_ARN" --protocol TCP --port 8265 --default-actions Type=forward,TargetGroupArn="$TG_ARN" > /dev/null
 
     URL=$(aws elbv2 describe-load-balancers --load-balancer-arns "$LB_ARN" --query "LoadBalancers[0].DNSName" --output text)
-    echo -e "${COLOR_GREEN}----------------------------------------------------------------"
-    echo "🚀 NEURAL HYPERNOVA LIVE: http://$URL:8265"
-    echo "----------------------------------------------------------------${COLOR_RESET}"
+    echo -e "${COLOR_GREEN}🚀 DASHBOARD: http://$URL:8265 (Wait 60s for NLB to activate)${COLOR_RESET}"
 }
 
 function nuke() {
     bootstrap
-    log "☢️ SCORCHED EARTH..."
+    log "☢️ NUCLEAR RESET..."
     cd "$TF_DIR"
     rm -rf .terraform .terraform.lock.hcl
     terraform init "${INIT_OPTS[@]}" -reconfigure || true
-    
     VPC_ID=$(terraform output -raw vpc_id 2>/dev/null || echo "")
     RAND_ID=$(terraform output -raw random_id 2>/dev/null || echo "final")
     NAME=$(terraform output -raw cluster_name 2>/dev/null || echo "hypernova")
-
-    log "1. Clearing NLB..."
-    LB_ARNS=$(aws elbv2 describe-load-balancers --query "LoadBalancers[?contains(LoadBalancerName, 'hyper-lb')].LoadBalancerArn" --output text)
-    for lb in $LB_ARNS; do aws elbv2 delete-load-balancer --load-balancer-arn "$lb"; done
-
-    log "2. Erasing Cluster Debris..."
     aws eks delete-cluster --name "$NAME" --region us-east-1 2>/dev/null || true
     for eip in $(aws ec2 describe-addresses --region us-east-1 --query "Addresses[?VpcId=='$VPC_ID'].AllocationId" --output text); do
       aws ec2 release-address --allocation-id "$eip" --region us-east-1 || true

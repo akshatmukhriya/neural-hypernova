@@ -12,13 +12,13 @@ spec:
       spec:
         containers:
           - name: ray-head
-            image: rayproject/ray-ml:2.9.0-py310-gpu
+            # THE SPEED FIX: Use base Ray image for the Head (much smaller)
+            image: rayproject/ray:2.9.0-py310 
             ports:
               - containerPort: 8265
               - containerPort: 6379
               - containerPort: 10001
             resources:
-              # FIXED: Reduced to fit on t3.medium (4GB RAM)
               limits:
                 cpu: "1"
                 memory: "2Gi"
@@ -26,12 +26,11 @@ spec:
                 cpu: "500m"
                 memory: "1Gi"
   workerGroupSpecs:
-    - replicas: 2
+    - replicas: 1 # Start with 1 to verify Karpenter
       groupName: gpu-group
       rayStartParams: {}
       template:
         spec:
-          # Karpenter will see this and spawn G5/P4 instances
           runtimeClassName: nvidia 
           containers:
             - name: ray-worker

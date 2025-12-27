@@ -1,4 +1,4 @@
-# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V29.0.0 ---
+# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V30.0.0 ---
 
 terraform {
   required_version = ">= 1.5.0"
@@ -26,22 +26,18 @@ variable "runner_arn" {
   default = ""
 }
 
-# --- 1. NETWORK ---
 module "vpc" {
   source  = "terraform-aws-modules/vpc/aws"
   version = "5.2.0"
   name    = "hypernova-vpc-${random_string.id.result}"
   cidr    = "10.0.0.0/16"
   azs     = ["us-east-1a", "us-east-1b", "us-east-1c"]
-  
   private_subnets = ["10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24"]
   public_subnets  = ["10.0.101.0/24", "10.0.102.0/24", "10.0.103.0/24"]
-
   enable_nat_gateway = true
   single_nat_gateway = true 
 }
 
-# --- 2. THE BRAIN (EKS 1.31) ---
 module "eks" {
   source  = "terraform-aws-modules/eks/aws"
   version = "20.24.0"
@@ -52,7 +48,7 @@ module "eks" {
   subnet_ids      = module.vpc.private_subnets
 
   authentication_mode                      = "API_AND_CONFIG_MAP"
-  enable_cluster_creator_admin_permissions = false
+  enable_cluster_creator_admin_permissions = true
   cluster_endpoint_public_access           = true
 
   create_kms_key              = false
@@ -61,30 +57,26 @@ module "eks" {
 
   node_security_group_additional_rules = {
     ingress_ray = {
-      description = "Ray Dashboard NodePort"
+      description = "Ray Dashboard"
       protocol    = "tcp"
       from_port   = 30265
       to_port     = 30265
       type        = "ingress"
       cidr_blocks = ["0.0.0.0/0"]
     }
-  }
-
-  access_entries = {
-    runner = {
-      principal_arn = var.runner_arn
-      policy_associations = {
-        admin = {
-          policy_arn = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
-          access_scope = { type = "cluster" }
-        }
-      }
+    ingress_vpc_all = {
+      description = "Internal Handshake"
+      protocol    = "-1"
+      from_port   = 0
+      to_port     = 0
+      type        = "ingress"
+      cidr_blocks = ["10.0.0.0/16"]
     }
   }
 
   eks_managed_node_groups = {
     brain = {
-      name           = "node-pool-${random_string.id.result}"
+      name           = "brain-pool-${random_string.id.result}"
       instance_types = ["t3.large"]
       ami_type       = "AL2023_x86_64_STANDARD"
       min_size       = 1
