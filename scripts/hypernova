@@ -25,9 +25,9 @@ function bootstrap() {
 
 function ignite() {
     bootstrap
-    log "🚀 Ignite Sequence: V32.0.0"
+    log "🚀 Ignite Sequence: V33.0.0"
     
-    # THE QUOTA FIX: Release all unattached IPs to allow NAT creation
+    # THE QUOTA FIX
     log "🧹 Cleaning IP Debris..."
     for eip in $(aws ec2 describe-addresses --query "Addresses[?AssociationId==null].AllocationId" --output text); do
       aws ec2 release-address --allocation-id $eip || true
@@ -36,11 +36,16 @@ function ignite() {
     cd "$TF_DIR"
     rm -rf .terraform .terraform.lock.hcl
     terraform init "${INIT_OPTS[@]}" -reconfigure
+    
+    # Clear any deposed states causing cycles
+    log "🛠️ Purging State Phantoms..."
+    terraform refresh "${APPLY_OPTS[@]}" || true
+    
     terraform apply "${APPLY_OPTS[@]}"
     NAME=$(terraform output -raw cluster_name)
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
 
-    log "🛠️ Registering Global Repos..."
+    log "🛠️ Registering Repos..."
     helm repo add cilium https://helm.cilium.io/
     helm repo add kuberay https://ray-project.github.io/kuberay-helm/
     helm repo update
@@ -75,7 +80,7 @@ function demo() {
     SUBNETS=$(terraform output -json public_subnets | jq -r '.[]' | paste -sd " " -)
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
 
-    log "🌐 Step 1: Deploying Dashboard NodePort..."
+    log "🌐 Ensuring Dashboard NodePort..."
     cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: Service
@@ -113,7 +118,6 @@ function nuke() {
     cd "$TF_DIR"
     rm -rf .terraform .terraform.lock.hcl
     terraform init "${INIT_OPTS[@]}" -reconfigure || true
-    
     VPC_ID=$(terraform output -raw vpc_id 2>/dev/null || echo "")
     RAND_ID=$(terraform output -raw random_id 2>/dev/null || echo "final")
     NAME=$(terraform output -raw cluster_name 2>/dev/null || echo "hypernova")

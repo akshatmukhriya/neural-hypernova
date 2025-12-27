@@ -1,4 +1,4 @@
-# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V32.0.0 ---
+# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V33.0.0 ---
 
 terraform {
   required_version = ">= 1.5.0"
@@ -15,7 +15,6 @@ terraform {
 
 provider "aws" { region = "us-east-1" }
 
-# THE GHOST-BREAKER: New ID for every iteration
 resource "random_string" "id" {
   length  = 4
   special = false
@@ -40,6 +39,7 @@ module "vpc" {
 
   enable_nat_gateway = true
   single_nat_gateway = true 
+  public_subnet_tags = { "kubernetes.io/role/elb" = 1 }
 }
 
 # --- 2. THE BRAIN (EKS 1.31) ---
@@ -52,17 +52,15 @@ module "eks" {
   vpc_id          = module.vpc.vpc_id
   subnet_ids      = module.vpc.private_subnets
 
-  # --- ATOMIC CLEANUP: REMOVE ALL ENCRYPTION/LOG BLOCKS ---
-  # By omitting 'cluster_encryption_config' and setting 'create_kms_key' to false,
-  # we bypass the module bug entirely.
-  create_kms_key = false
-  create_cloudwatch_log_group = false
-
-  authentication_mode                      = "API_AND_CONFIG_MAP"
+  # --- THE ULTIMATE BYPASS: REMOVE ALL OPTIONAL BLOCKS ---
+  create_kms_key      = false
+  enable_irsa         = true
+  authentication_mode = "API_AND_CONFIG_MAP"
+  
+  # This flag is the single source of truth for admin access
   enable_cluster_creator_admin_permissions = true
-  cluster_endpoint_public_access           = true
 
-  # Industrial Security Rules
+  # Security Rules
   node_security_group_additional_rules = {
     ingress_ray = {
       description = "Ray Dashboard NodePort"
@@ -73,7 +71,7 @@ module "eks" {
       cidr_blocks = ["0.0.0.0/0"]
     }
     ingress_vpc_all = {
-      description = "Internal Handshake"
+      description = "VPC Internal"
       protocol    = "-1"
       from_port   = 0
       to_port     = 0
