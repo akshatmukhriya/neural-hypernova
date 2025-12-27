@@ -25,7 +25,7 @@ function bootstrap() {
 
 function ignite() {
     bootstrap
-    log "🚀 Ignite Sequence: V17.0.0 (The Final Strike)"
+    log "🚀 Ignite Sequence: V18.0.0 (The Final Stand)"
     cd "$TF_DIR"
     rm -rf .terraform .terraform.lock.hcl
     terraform init "${INIT_OPTS[@]}" -reconfigure
@@ -36,10 +36,10 @@ function ignite() {
     ROLE_ARN=$(terraform output -raw lb_role_arn)
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
 
-    log "🧹 Initial Webhook Purge..."
+    log "🧹 Webhook Phantom Purge..."
     kubectl delete mutatingwebhookconfiguration --all || true
 
-    log "🛠️ Updating Repos..."
+    log "🛠️ Updating Operational Layers..."
     helm repo add cilium https://helm.cilium.io/
     helm repo add eks https://aws.github.io/eks-charts
     helm repo add ray https://ray-project.github.io/kuberay-helm/
@@ -49,16 +49,10 @@ function ignite() {
     helm upgrade --install cilium cilium/cilium --version 1.16.5 -n kube-system \
       --set kubeProxyReplacement=true --set-string debug.verbose="" --wait=false
 
-    # COMPUTE FIRST ORDER
     log "💉 Phase 2: Karpenter & Ray..."
     helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter --version 1.1.1 \
       -n karpenter --create-namespace --set settings.clusterName="$NAME" --wait=false
-    helm upgrade --install kuberay-operator ray/kuberay-operator --version 1.2.2 --wait=false
-
-    log "🏗️ Applying Forge Manifests..."
-    sleep 20
-    kubectl apply -f "$K8S_DIR/core/karpenter-gpu-pool.yaml"
-    kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"
+    helm upgrade --install kuberay kuberay/kuberay-operator --version 1.2.2 --wait=false
 
     log "💉 Phase 3: AWS Load Balancer Controller..."
     kubectl apply -f https://raw.githubusercontent.com/aws/eks-charts/master/stable/aws-load-balancer-controller/crds/crds.yaml
@@ -69,26 +63,33 @@ function ignite() {
       --set region=us-east-1 --set vpcId="$VPC_ID" \
       --set webhookConfig.failurePolicy=Ignore --wait=false
 
+    log "🏗️ Applying Forge Manifests..."
+    sleep 20
+    kubectl apply -f "$K8S_DIR/core/karpenter-gpu-pool.yaml"
+    kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"
     log "✅ SYSTEM ARMED."
 }
 
 function demo() {
     bootstrap
-    log "🎭 Spectator Protocol (The Lockdown Bypass)..."
+    log "🎭 Launching Spectator Protocol (Deterministic Bypass)..."
     cd "$TF_DIR"
     terraform init "${INIT_OPTS[@]}" -reconfigure > /dev/null
     NAME=$(terraform output -raw cluster_name)
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
 
-    # --- THE QUARANTINE: SCALE -> DELETE -> APPLY -> SCALE ---
-    log "⚔️  Quarantining Webhook Controller..."
-    kubectl scale deployment aws-load-balancer-controller -n kube-system --replicas=0
-    
-    log "🧹 Removing Webhook Configuration Object..."
+    log "⚔️  Neutralizing Webhook Admission Controller..."
+    # 1. Delete the configuration
     kubectl delete mutatingwebhookconfiguration elbv2.k8s.aws-mutating-webhook-configuration --ignore-not-found
     
-    log "🌐 Exposing Dashboard (Unimpeded)..."
-    # We apply NodePort first as a fallback, then LoadBalancer
+    # 2. WAIT until the API server acknowledges it's gone
+    log "⏳ Waiting for API Server cache to clear..."
+    while kubectl get mutatingwebhookconfiguration elbv2.k8s.aws-mutating-webhook-configuration >/dev/null 2>&1; do
+        sleep 2
+    done
+    log "✅ Cache Clear. Path is Unrestricted."
+
+    log "🌐 Exposing Dashboard..."
     cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: Service
@@ -103,14 +104,12 @@ spec:
   ports: [{ name: dash, port: 8265, targetPort: 8265 }]
 EOF
 
-    log "⚔️  Restoring Webhook Controller..."
-    kubectl scale deployment aws-load-balancer-controller -n kube-system --replicas=1
-
     log "⏳ Phase 1: DNS Identification..."
     local URL=""
     while [ -z "$URL" ]; do
         URL=$(kubectl get svc hypernova-dashboard-lb -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
         [ ! -z "$URL" ] && break
+        log "Waiting for DNS... (10s)"
         sleep 10
     done
     log "🚀 DASHBOARD: http://$URL:8265"

@@ -1,4 +1,4 @@
-# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V17.0.0 ---
+# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V18.0.0 ---
 
 terraform {
   required_version = ">= 1.5.0"
@@ -65,8 +65,28 @@ module "eks" {
   cluster_endpoint_public_access = true
   enable_cluster_creator_admin_permissions = true
 
-  # REQUIRED: Disable module's internal rules to prevent 'Duplicate' collisions
-  node_security_group_enable_recommended_rules = false
+  # Use Standard EKS Rules for Node Joining
+  node_security_group_enable_recommended_rules = true
+
+  # Add Ray and VPC internal access
+  node_security_group_additional_rules = {
+    ingress_vpc_all = {
+      description = "VPC Internal Handshake"
+      protocol    = "-1"
+      from_port   = 0
+      to_port     = 0
+      type        = "ingress"
+      cidr_blocks = ["10.0.0.0/16"]
+    }
+    ingress_ray_public = {
+      description = "Ray Dashboard Public"
+      protocol    = "tcp"
+      from_port   = 8265
+      to_port     = 8265
+      type        = "ingress"
+      cidr_blocks = ["0.0.0.0/0"]
+    }
+  }
 
   eks_managed_node_groups = {
     brain = {
@@ -77,51 +97,9 @@ module "eks" {
       desired_size   = 1
     }
   }
-
-  access_entries = {
-    runner = {
-      principal_arn = var.runner_arn
-      policy_associations = {
-        admin = {
-          policy_arn = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
-          access_scope = { type = "cluster" }
-        }
-      }
-    }
-  }
 }
 
-# --- 3. HARDENED SECURITY (CIDR BYPASS) ---
-resource "aws_security_group_rule" "node_internal_all" {
-  description       = "Allow all VPC internal traffic to nodes"
-  type              = "ingress"
-  from_port         = 0
-  to_port           = 0
-  protocol          = "-1"
-  cidr_blocks       = ["10.0.0.0/16"]
-  security_group_id = module.eks.node_security_group_id
-}
-
-resource "aws_security_group_rule" "node_ray_public" {
-  description       = "Allow Ray Dashboard Public"
-  type              = "ingress"
-  from_port         = 8265
-  to_port           = 8265
-  protocol          = "tcp"
-  cidr_blocks       = ["0.0.0.0/0"]
-  security_group_id = module.eks.node_security_group_id
-}
-
-resource "aws_security_group_rule" "node_egress_all" {
-  type              = "egress"
-  from_port         = 0
-  to_port           = 0
-  protocol          = "-1"
-  cidr_blocks       = ["0.0.0.0/0"]
-  security_group_id = module.eks.node_security_group_id
-}
-
-# --- 4. IAM FOR LBC ---
+# --- 3. IAM FOR LBC ---
 resource "aws_iam_policy" "lbc" {
   name        = "AWSLBCPolicy-${random_string.id.result}"
   policy      = data.http.lb_policy.response_body
@@ -145,7 +123,6 @@ resource "aws_iam_role_policy_attachment" "lbc" {
   role       = aws_iam_role.lbc.name
 }
 
-# --- 5. OUTPUTS ---
 output "cluster_name" { value = module.eks.cluster_name }
 output "vpc_id"       { value = module.vpc.vpc_id }
 output "lb_role_arn"  { value = aws_iam_role.lbc.arn }
