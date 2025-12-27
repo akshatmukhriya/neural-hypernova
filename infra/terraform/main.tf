@@ -100,9 +100,34 @@ module "eks" {
   }
 }
 
+module "karpenter_controller_role" {
+  source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
+  version = "5.33.0"
+
+  role_name = "karpenter-controller-${random_string.id.result}"
+
+  # This creates the exact policy Karpenter v1.1.1 needs
+  attach_karpenter_controller_policy = true
+  
+  # We give it permission to manage the specific Node Role we defined
+  karpenter_controller_cluster_name = module.eks.cluster_name
+  karpenter_controller_node_iam_role_arns = [
+    "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/KarpenterNodeRole-neural-hypernova"
+  ]
+
+  oidc_providers = {
+    main = {
+      provider_arn               = module.eks.oidc_provider_arn
+      namespace_service_accounts = ["karpenter:karpenter"]
+    }
+  }
+}
+
+
 output "cluster_name"    { value = module.eks.cluster_name }
 output "vpc_id"          { value = module.vpc.vpc_id }
 output "public_subnets"  { value = module.vpc.public_subnets }
 output "random_id"       { value = random_string.id.result }
 output "private_subnet_ids" { value = module.vpc.private_subnets }
 output "node_security_group_id" { value = module.eks.node_security_group_id }
+output "karpenter_controller_role_arn" { value = module.karpenter_controller_role.iam_role_arn }
