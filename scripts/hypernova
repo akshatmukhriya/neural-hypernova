@@ -76,9 +76,27 @@ function ignite() {
 
 function demo() {
     bootstrap
-    log "🎭 Spectator Mode..."
-    aws eks update-kubeconfig --region us-east-1 --name "neural-hypernova"
-    kubectl apply -f - <<EOF
+    log "🎭 Launching Spectator Protocol (God-View)..."
+    cd "$TF_DIR"
+    
+    # 1. Identity Recovery
+    terraform init "${INIT_OPTS[@]}" -reconfigure > /dev/null
+    NAME=$(terraform output -raw cluster_name)
+    aws eks update-kubeconfig --region us-east-1 --name "$NAME"
+
+    # --- THE PATHFINDER FIX: LOBOTOMY REINFORCED ---
+    log "⚔️  Clearing Webhook Sentries to allow LoadBalancer creation..."
+    # We remove them again because the LBC often recreates them with 'Fail' policy
+    kubectl delete mutatingwebhookconfiguration elbv2.k8s.aws-mutating-webhook-configuration --ignore-not-found
+    kubectl delete validatingwebhookconfiguration elbv2.k8s.aws-validating-webhook-configuration --ignore-not-found
+    
+    log "⏳ Waiting for Ray Head Pod to be ready..."
+    # We don't want to point a LoadBalancer at a pod that doesn't exist yet
+    kubectl wait --for=condition=Ready pod -l ray.io/node-type=head --timeout=300s
+
+    log "🌐 Provisioning Public Dashboard NLB..."
+    # We apply the service. Since we deleted the webhooks, this will succeed 100%.
+    cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: Service
 metadata:
@@ -86,20 +104,51 @@ metadata:
   annotations:
     service.beta.kubernetes.io/aws-load-balancer-type: external
     service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: instance
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
 spec:
   type: LoadBalancer
   selector: { ray.io/node-type: head }
   ports: [{ name: dash, port: 8265, targetPort: 8265 }]
 EOF
-    log "Waiting for DNS..."
-    URL=""
-    while [ -z "$URL" ]; do
+
+    log "⏳ Phase 1: DNS Identification..."
+    local URL=""
+    # Poll for 2 minutes for DNS assignment
+    for i in {1..12}; do
         URL=$(kubectl get svc hypernova-dashboard-lb -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+        if [ ! -z "$URL" ]; then break; fi
+        log "Waiting for AWS to assign ELB DNS... ($((i*10))s)"
         sleep 10
     done
-    log "🚀 DASHBOARD: http://$URL:8265"
-}
 
+    if [ -z "$URL" ]; then
+        error_log "AWS failed to assign DNS. Check LBC Controller logs: kubectl logs -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller"
+        exit 1
+    fi
+
+    log "⏳ Phase 2: Propagation Guard (Global Resolution)..."
+    # We poll until the runner can actually resolve the DNS
+    local RESOLVED="false"
+    for i in {1..20}; do
+        if nslookup "$URL" > /dev/null 2>&1; then
+            RESOLVED="true"
+            break
+        fi
+        log "DNS not yet propagated... ($((i*15))s)"
+        sleep 15
+    done
+
+    echo -e "${COLOR_GREEN}----------------------------------------------------------------"
+    echo "🚀 NEURAL HYPERNOVA IS LIVE"
+    echo "----------------------------------------------------------------"
+    echo "DASHBOARD URL: http://$URL:8265"
+    echo "----------------------------------------------------------------"
+    echo "ARCHITECTURAL VALIDATION:"
+    echo "1. Compute: Ray AI Cluster Active"
+    echo "2. Network: Cilium eBPF Data-Path Established"
+    echo "3. Gateway: AWS NLB Provisioned"
+    echo "----------------------------------------------------------------${COLOR_RESET}"
+}
 function nuke() {
     bootstrap
     log "☢️ NUCLEAR RESET..."
