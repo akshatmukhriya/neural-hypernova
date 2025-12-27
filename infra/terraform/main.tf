@@ -1,4 +1,4 @@
-# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V27.0.0 ---
+# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V28.0.0 ---
 
 terraform {
   required_version = ">= 1.5.0"
@@ -13,25 +13,21 @@ terraform {
   }
 }
 
-provider "aws" {
-  region = "us-east-1"
-}
+provider "aws" { region = "us-east-1" }
 
-# --- 1. GLOBAL VARIABLES ---
-variable "runner_arn" {
-  type    = string
-  default = ""
-}
-
+# THE FORCE REPLACER: Ensures every 'ignite' is a fresh resource
 resource "random_string" "id" {
   length  = 4
   special = false
   upper   = false
 }
 
-data "aws_caller_identity" "current" {}
+variable "runner_arn" {
+  type    = string
+  default = ""
+}
 
-# --- 2. NETWORK ---
+# --- 1. NETWORK ---
 module "vpc" {
   source  = "terraform-aws-modules/vpc/aws"
   version = "5.2.0"
@@ -46,36 +42,7 @@ module "vpc" {
   single_nat_gateway = true 
 }
 
-# --- 3. DEDICATED SECURITY GROUP (The Forge Shield) ---
-resource "aws_security_group" "forge_sg" {
-  name_prefix = "hypernova-forge-sg-"
-  vpc_id      = module.vpc.vpc_id
-
-  # Internal handshake
-  ingress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["10.0.0.0/16"]
-  }
-
-  # Ray Dashboard NodePort (For NLB Bypass)
-  ingress {
-    from_port   = 30265
-    to_port     = 30265
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-}
-
-# --- 4. THE BRAIN (EKS 1.31) ---
+# --- 2. THE BRAIN (EKS 1.31) ---
 module "eks" {
   source  = "terraform-aws-modules/eks/aws"
   version = "20.24.0"
@@ -85,17 +52,29 @@ module "eks" {
   vpc_id          = module.vpc.vpc_id
   subnet_ids      = module.vpc.private_subnets
 
-  create_kms_key              = false
-  create_cloudwatch_log_group = false
-  cluster_encryption_config   = {} 
-
-  # THE IDENTITY FIX: Force API_AND_CONFIG_MAP and disable auto-permissions
   authentication_mode                      = "API_AND_CONFIG_MAP"
   enable_cluster_creator_admin_permissions = false
+  cluster_endpoint_public_access           = true
 
-  # Manual Identity Mapping
+  # REQUIRED: Disable all custom KMS/Logs to prevent global collisions
+  create_kms_key              = false
+  create_cloudwatch_log_group = false
+  cluster_encryption_config   = {}
+
+  # ALLOW THE Handshake ports in the default SG
+  node_security_group_additional_rules = {
+    ingress_ray = {
+      description = "Ray Dashboard"
+      protocol    = "tcp"
+      from_port   = 30265 # NodePort for the bypass
+      to_port     = 30265
+      type        = "ingress"
+      cidr_blocks = ["0.0.0.0/0"]
+    }
+  }
+
   access_entries = {
-    # 1. Grant the Runner (GitHub) Admin
+    # 1. GitHub Runner Access
     runner = {
       principal_arn = var.runner_arn
       policy_associations = {
@@ -105,23 +84,29 @@ module "eks" {
         }
       }
     }
-    # 2. Grant the Nodes permission to JOIN the cluster
-    nodes = {
-      principal_arn = module.eks.eks_managed_node_groups["brain"].iam_role_arn
-      type          = "EC2_LINUX"
-    }
   }
 
   eks_managed_node_groups = {
     brain = {
+      # Use a unique name to prevent 'modifying failed resource' loop
+      name           = "node-pool-${random_string.id.result}"
       instance_types = ["t3.large"]
       ami_type       = "AL2023_x86_64_STANDARD"
-      vpc_security_group_ids = [aws_security_group.forge_sg.id]
+      min_size       = 1
+      max_size       = 1
+      desired_size   = 1
     }
   }
 }
 
-# --- 5. OUTPUTS ---
+# --- 3. DYNAMIC NODE IDENTITY (The Join Fix) ---
+# This forces the EKS API to trust the node role created by the module
+resource "aws_eks_access_entry" "node_join" {
+  cluster_name  = module.eks.cluster_name
+  principal_arn = module.eks.eks_managed_node_groups["brain"].iam_role_arn
+  type          = "EC2_LINUX"
+}
+
 output "cluster_name"    { value = module.eks.cluster_name }
 output "vpc_id"          { value = module.vpc.vpc_id }
 output "public_subnets"  { value = module.vpc.public_subnets }
