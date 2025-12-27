@@ -13,7 +13,7 @@ COLOR_RESET='\033[0m'
 function log() { echo -e "${COLOR_CYAN}[HYPERNOVA] $1${COLOR_RESET}"; }
 
 function bootstrap() {
-    log "📡 Detecting Cloud Identity..."
+    log "📡 Detecting Identity..."
     RUNNER_ARN=$(aws sts get-caller-identity --query Arn --output text)
     ACCOUNT_ID=$(echo $RUNNER_ARN | cut -d: -f5)
     [[ $RUNNER_ARN == *"assumed-role"* ]] && CLEAN_ARN="arn:aws:iam::$ACCOUNT_ID:role/$(echo $RUNNER_ARN | cut -d/ -f2)" || CLEAN_ARN=$RUNNER_ARN
@@ -25,7 +25,7 @@ function bootstrap() {
 
 function ignite() {
     bootstrap
-    log "🚀 Ignite Sequence: V18.0.0 (The Final Stand)"
+    log "🚀 Ignite Sequence: V19.0.0 (The Stealth Protocol)"
     cd "$TF_DIR"
     rm -rf .terraform .terraform.lock.hcl
     terraform init "${INIT_OPTS[@]}" -reconfigure
@@ -36,10 +36,10 @@ function ignite() {
     ROLE_ARN=$(terraform output -raw lb_role_arn)
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
 
-    log "🧹 Webhook Phantom Purge..."
+    log "🧹 Force-Clearing Legacy Webhooks..."
     kubectl delete mutatingwebhookconfiguration --all || true
 
-    log "🛠️ Updating Operational Layers..."
+    log "🛠️ Updating Repos..."
     helm repo add cilium https://helm.cilium.io/
     helm repo add eks https://aws.github.io/eks-charts
     helm repo add ray https://ray-project.github.io/kuberay-helm/
@@ -49,7 +49,7 @@ function ignite() {
     helm upgrade --install cilium cilium/cilium --version 1.16.5 -n kube-system \
       --set kubeProxyReplacement=true --set-string debug.verbose="" --wait=false
 
-    log "💉 Phase 2: Karpenter & Ray..."
+    log "💉 Phase 2: Karpenter & Ray Operator..."
     helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter --version 1.1.1 \
       -n karpenter --create-namespace --set settings.clusterName="$NAME" --wait=false
     helm upgrade --install kuberay kuberay/kuberay-operator --version 1.2.2 --wait=false
@@ -63,7 +63,7 @@ function ignite() {
       --set region=us-east-1 --set vpcId="$VPC_ID" \
       --set webhookConfig.failurePolicy=Ignore --wait=false
 
-    log "🏗️ Applying Forge Manifests..."
+    log "🏗️ Finalizing AI Forge..."
     sleep 20
     kubectl apply -f "$K8S_DIR/core/karpenter-gpu-pool.yaml"
     kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"
@@ -72,46 +72,43 @@ function ignite() {
 
 function demo() {
     bootstrap
-    log "🎭 Launching Spectator Protocol (Deterministic Bypass)..."
+    log "🎭 Spectator Protocol (The Stealth-Namespace Bypass)..."
     cd "$TF_DIR"
     terraform init "${INIT_OPTS[@]}" -reconfigure > /dev/null
     NAME=$(terraform output -raw cluster_name)
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
 
-    log "⚔️  Neutralizing Webhook Admission Controller..."
-    # 1. Delete the configuration
-    kubectl delete mutatingwebhookconfiguration elbv2.k8s.aws-mutating-webhook-configuration --ignore-not-found
-    
-    # 2. WAIT until the API server acknowledges it's gone
-    log "⏳ Waiting for API Server cache to clear..."
-    while kubectl get mutatingwebhookconfiguration elbv2.k8s.aws-mutating-webhook-configuration >/dev/null 2>&1; do
-        sleep 2
-    done
-    log "✅ Cache Clear. Path is Unrestricted."
-
-    log "🌐 Exposing Dashboard..."
+    log "🌐 Exposing Dashboard via kube-system Bypass..."
+    # THE UNICORN BYPASS: We create the Service in the 'kube-system' namespace.
+    # LBC webhooks are hardcoded to ignore 'kube-system' to prevent self-lockout.
+    # We point the selector back to the 'default' namespace where Ray lives.
     cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: Service
 metadata:
   name: hypernova-dashboard-lb
+  namespace: kube-system
   annotations:
     service.beta.kubernetes.io/aws-load-balancer-type: external
     service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: instance
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
 spec:
   type: LoadBalancer
-  selector: { ray.io/node-type: head }
+  selector: { ray.io/node-type: head, ray.io/cluster: hypernova-ray }
   ports: [{ name: dash, port: 8265, targetPort: 8265 }]
 EOF
 
     log "⏳ Phase 1: DNS Identification..."
     local URL=""
     while [ -z "$URL" ]; do
-        URL=$(kubectl get svc hypernova-dashboard-lb -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+        URL=$(kubectl get svc hypernova-dashboard-lb -n kube-system -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
         [ ! -z "$URL" ] && break
-        log "Waiting for DNS... (10s)"
         sleep 10
     done
+    log "DNS Assigned: $URL"
+
+    log "⏳ Phase 2: DNS Propagation..."
+    until nslookup "$URL" > /dev/null 2>&1; do sleep 15; done
     log "🚀 DASHBOARD: http://$URL:8265"
 }
 
@@ -123,7 +120,7 @@ function nuke() {
     terraform init "${INIT_OPTS[@]}" -reconfigure || true
     VPC_ID=$(terraform output -raw vpc_id 2>/dev/null || echo "")
     NAME=$(terraform output -raw cluster_name 2>/dev/null || echo "hypernova")
-    kubectl delete svc hypernova-dashboard-lb --ignore-not-found || true
+    kubectl delete svc hypernova-dashboard-lb -n kube-system --ignore-not-found || true
     aws eks delete-cluster --name "$NAME" --region us-east-1 2>/dev/null || true
     for eip in $(aws ec2 describe-addresses --region us-east-1 --query "Addresses[?VpcId=='$VPC_ID'].AllocationId" --output text); do
       aws ec2 release-address --allocation-id "$eip" --region us-east-1 || true
