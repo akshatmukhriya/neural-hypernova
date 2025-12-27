@@ -79,15 +79,21 @@ function ignite() {
 
 function demo() {
     bootstrap
-    log "🎭 Spectator Mode..."
-    NAME=$(cd "$TF_DIR" && terraform output -raw cluster_name)
-    aws eks update-kubeconfig --region us-east-1 --name "$NAME"
+    log "🎭 Launching Spectator Protocol..."
+    cd "$TF_DIR"
     
-    # We remove the webhooks again right before applying the demo service
-    # just in case they are still in a 'Fail' state.
-    kubectl delete mutatingwebhookconfiguration elbv2.k8s.aws-mutating-webhook-configuration --ignore-not-found
+    # 1. Sync State (Fresh Runner needs to talk to S3)
+    log "Syncing state with foundation..."
+    terraform init "${INIT_OPTS[@]}" -reconfigure > /dev/null
+    NAME=$(terraform output -raw cluster_name)
+    aws eks update-kubeconfig --region us-east-1 --name "$NAME"
 
-    kubectl apply -f - <<EOF
+    # 2. Kill Webhooks (Ensure Zero-Resistance for the Service creation)
+    log "⚔️  Clearing Webhook Sentries..."
+    kubectl delete mutatingwebhookconfiguration elbv2.k8s.aws-mutating-webhook-configuration --ignore-not-found
+    
+    log "🌐 Exposing Dashboard via AWS NLB..."
+    cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: Service
 metadata:
@@ -95,18 +101,32 @@ metadata:
   annotations:
     service.beta.kubernetes.io/aws-load-balancer-type: external
     service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: instance
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
 spec:
   type: LoadBalancer
   selector: { ray.io/node-type: head }
   ports: [{ name: dash, port: 8265, targetPort: 8265 }]
 EOF
-    log "Waiting for DNS..."
-    URL=""
+
+    log "⏳ Phase 1: DNS Identification..."
+    local URL=""
     while [ -z "$URL" ]; do
         URL=$(kubectl get svc hypernova-dashboard-lb -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+        [ ! -z "$URL" ] && break
+        log "Waiting for AWS to assign DNS name... (10s)"
         sleep 10
     done
-    log "🚀 DASHBOARD: http://$URL:8265"
+    log "DNS Assigned: $URL"
+
+    log "⏳ Phase 2: Propagation Guard..."
+    until nslookup "$URL" > /dev/null 2>&1; do
+        log "Waiting for DNS propagation... (15s)"
+        sleep 15
+    done
+
+    echo -e "${COLOR_GREEN}----------------------------------------------------------------"
+    echo "🚀 NEURAL HYPERNOVA LIVE: http://$URL:8265"
+    echo "----------------------------------------------------------------${COLOR_RESET}"
 }
 
 function nuke() {
