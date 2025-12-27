@@ -1,31 +1,54 @@
 apiVersion: ray.io/v1
 kind: RayJob
 metadata:
-  name: hypernova-stress-test
+  name: hypernova-gpu-surge
+  labels:
+    hypernova-controlled: "true" # Our Spectator Protocol recognizes this
 spec:
-  entrypoint: python -c "import ray; ray.init(); [ray.remote(num_gpus=1)(lambda: 1+1).remote() for _ in range(4)]; import time; time.sleep(300)"
+  # The atomic unit of work: Submit a distributed task requiring 2 GPUs
+  entrypoint: |
+    python -c "import ray; ray.init(); @ray.remote(num_gpus=1) def work(): import time; time.sleep(120); return 1; ray.get([work.remote() for _ in range(2)])"
   rayClusterSpec:
     rayVersion: '2.9.0'
     headGroupSpec:
+      rayStartParams:
+        dashboard-host: "0.0.0.0"
+        block: "true"
       template:
         spec:
           containers:
             - name: ray-head
-              image: rayproject/ray-ml:2.9.0-py310-gpu
+              image: rayproject/ray:2.9.0-py310 
+              ports:
+                - containerPort: 8265
+                - containerPort: 6379
+                - containerPort: 10001
               resources:
-                limits: { cpu: "2", memory: "8Gi" }
+                limits:
+                  cpu: "1"
+                  memory: "2Gi"
+                requests:
+                  cpu: "500m"
+                  memory: "1Gi"
     workerGroupSpecs:
-      - replicas: 0 # Start at zero to show Karpenter's speed
+      - replicas: 0 # Start at zero to trigger Karpenter JIT provisioning
         minReplicas: 0
-        maxReplicas: 10
+        maxReplicas: 5
         groupName: gpu-group
+        # THE FIX: Explicit parameters required by KubeRay v1 Schema
+        rayStartParams: {} 
         template:
           spec:
+            runtimeClassName: nvidia 
             containers:
               - name: ray-worker
                 image: rayproject/ray-ml:2.9.0-py310-gpu
                 resources:
                   limits:
                     nvidia.com/gpu: 1
-                    cpu: "4"
-                    memory: "16Gi"
+                    cpu: "2"
+                    memory: "8Gi"
+                  requests:
+                    nvidia.com/gpu: 1
+                    cpu: "1"
+                    memory: "4Gi"
