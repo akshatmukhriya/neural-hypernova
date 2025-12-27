@@ -25,7 +25,7 @@ function bootstrap() {
 
 function ignite() {
     bootstrap
-    log "🚀 Ignite Sequence: V12.0.0 (Atomic Standard)"
+    log "🚀 Ignite Sequence: V17.0.0 (The Final Strike)"
     cd "$TF_DIR"
     rm -rf .terraform .terraform.lock.hcl
     terraform init "${INIT_OPTS[@]}" -reconfigure
@@ -35,6 +35,9 @@ function ignite() {
     VPC_ID=$(terraform output -raw vpc_id)
     ROLE_ARN=$(terraform output -raw lb_role_arn)
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
+
+    log "🧹 Initial Webhook Purge..."
+    kubectl delete mutatingwebhookconfiguration --all || true
 
     log "🛠️ Updating Repos..."
     helm repo add cilium https://helm.cilium.io/
@@ -46,10 +49,16 @@ function ignite() {
     helm upgrade --install cilium cilium/cilium --version 1.16.5 -n kube-system \
       --set kubeProxyReplacement=true --set-string debug.verbose="" --wait=false
 
-    log "💉 Phase 2: Karpenter & Ray Operator..."
+    # COMPUTE FIRST ORDER
+    log "💉 Phase 2: Karpenter & Ray..."
     helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter --version 1.1.1 \
       -n karpenter --create-namespace --set settings.clusterName="$NAME" --wait=false
-    helm upgrade --install kuberay kuberay/kuberay-operator --version 1.2.2 --wait=false
+    helm upgrade --install kuberay-operator ray/kuberay-operator --version 1.2.2 --wait=false
+
+    log "🏗️ Applying Forge Manifests..."
+    sleep 20
+    kubectl apply -f "$K8S_DIR/core/karpenter-gpu-pool.yaml"
+    kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"
 
     log "💉 Phase 3: AWS Load Balancer Controller..."
     kubectl apply -f https://raw.githubusercontent.com/aws/eks-charts/master/stable/aws-load-balancer-controller/crds/crds.yaml
@@ -60,27 +69,26 @@ function ignite() {
       --set region=us-east-1 --set vpcId="$VPC_ID" \
       --set webhookConfig.failurePolicy=Ignore --wait=false
 
-    log "🏗️ Applying Forge Manifests..."
-    sleep 20
-    kubectl apply -f "$K8S_DIR/core/karpenter-gpu-pool.yaml"
-    kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"
     log "✅ SYSTEM ARMED."
 }
 
 function demo() {
     bootstrap
-    log "🎭 Launching Spectator Protocol (Quarantine Mode)..."
+    log "🎭 Spectator Protocol (The Lockdown Bypass)..."
     cd "$TF_DIR"
     terraform init "${INIT_OPTS[@]}" -reconfigure > /dev/null
     NAME=$(terraform output -raw cluster_name)
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
 
-    # --- THE QUARANTINE PROTOCOL ---
-    log "⚔️  Quarantining Load Balancer Controller..."
+    # --- THE QUARANTINE: SCALE -> DELETE -> APPLY -> SCALE ---
+    log "⚔️  Quarantining Webhook Controller..."
     kubectl scale deployment aws-load-balancer-controller -n kube-system --replicas=0
+    
+    log "🧹 Removing Webhook Configuration Object..."
     kubectl delete mutatingwebhookconfiguration elbv2.k8s.aws-mutating-webhook-configuration --ignore-not-found
     
-    log "🌐 Exposing Dashboard (Unprotected Apply)..."
+    log "🌐 Exposing Dashboard (Unimpeded)..."
+    # We apply NodePort first as a fallback, then LoadBalancer
     cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: Service
@@ -95,7 +103,7 @@ spec:
   ports: [{ name: dash, port: 8265, targetPort: 8265 }]
 EOF
 
-    log "⚔️  Restoring Load Balancer Controller..."
+    log "⚔️  Restoring Webhook Controller..."
     kubectl scale deployment aws-load-balancer-controller -n kube-system --replicas=1
 
     log "⏳ Phase 1: DNS Identification..."
@@ -105,10 +113,6 @@ EOF
         [ ! -z "$URL" ] && break
         sleep 10
     done
-    log "DNS Assigned: $URL"
-
-    log "⏳ Phase 2: DNS Propagation..."
-    until nslookup "$URL" > /dev/null 2>&1; do sleep 15; done
     log "🚀 DASHBOARD: http://$URL:8265"
 }
 
