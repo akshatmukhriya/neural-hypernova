@@ -5,6 +5,7 @@ set -e
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 TF_DIR="$ROOT_DIR/infra/terraform"
 K8S_DIR="$ROOT_DIR/k8s"
+
 COLOR_CYAN='\033[0;36m'
 COLOR_GREEN='\033[0;32m'
 COLOR_RESET='\033[0m'
@@ -12,7 +13,7 @@ COLOR_RESET='\033[0m'
 function log() { echo -e "${COLOR_CYAN}[HYPERNOVA] $1${COLOR_RESET}"; }
 
 function bootstrap() {
-    log "📡 Detecting Identity..."
+    log "📡 Detecting Cloud Identity..."
     RUNNER_ARN=$(aws sts get-caller-identity --query Arn --output text)
     ACCOUNT_ID=$(echo $RUNNER_ARN | cut -d: -f5)
     [[ $RUNNER_ARN == *"assumed-role"* ]] && CLEAN_ARN="arn:aws:iam::$ACCOUNT_ID:role/$(echo $RUNNER_ARN | cut -d/ -f2)" || CLEAN_ARN=$RUNNER_ARN
@@ -24,7 +25,14 @@ function bootstrap() {
 
 function ignite() {
     bootstrap
-    log "🚀 Ignite Sequence: V31.0.0"
+    log "🚀 Ignite Sequence: V32.0.0"
+    
+    # THE QUOTA FIX: Release all unattached IPs to allow NAT creation
+    log "🧹 Cleaning IP Debris..."
+    for eip in $(aws ec2 describe-addresses --query "Addresses[?AssociationId==null].AllocationId" --output text); do
+      aws ec2 release-address --allocation-id $eip || true
+    done
+
     cd "$TF_DIR"
     rm -rf .terraform .terraform.lock.hcl
     terraform init "${INIT_OPTS[@]}" -reconfigure
@@ -45,12 +53,11 @@ function ignite() {
     helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter --version 1.1.1 \
       -n karpenter --create-namespace --set settings.clusterName="$NAME" --wait=false
 
-    log "💉 Phase 3: KubeRay Operator..."
-    # FIX: Using the 'kuberay' alias consistently
+    log "💉 Phase 3: KubeRay..."
     helm upgrade --install kuberay kuberay/kuberay-operator --version 1.2.2 --wait=false
 
-    log "🏗️ Pre-applying AI Forge..."
-    sleep 20
+    log "🏗️ Applying Forge Manifests..."
+    sleep 30
     kubectl apply -f "$K8S_DIR/core/karpenter-gpu-pool.yaml"
     kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"
     log "✅ SYSTEM ARMED."
@@ -61,13 +68,14 @@ function demo() {
     log "🎭 Launching Spectator Protocol..."
     cd "$TF_DIR"
     terraform init "${INIT_OPTS[@]}" -reconfigure > /dev/null
+    
     NAME=$(terraform output -raw cluster_name)
     VPC_ID=$(terraform output -raw vpc_id)
     RAND_ID=$(terraform output -raw random_id)
     SUBNETS=$(terraform output -json public_subnets | jq -r '.[]' | paste -sd " " -)
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
 
-    log "🌐 Ensuring Dashboard NodePort..."
+    log "🌐 Step 1: Deploying Dashboard NodePort..."
     cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: Service
@@ -105,11 +113,12 @@ function nuke() {
     cd "$TF_DIR"
     rm -rf .terraform .terraform.lock.hcl
     terraform init "${INIT_OPTS[@]}" -reconfigure || true
+    
     VPC_ID=$(terraform output -raw vpc_id 2>/dev/null || echo "")
     RAND_ID=$(terraform output -raw random_id 2>/dev/null || echo "final")
     NAME=$(terraform output -raw cluster_name 2>/dev/null || echo "hypernova")
 
-    log "1. Purging NLB..."
+    log "1. Purging Hardware..."
     LB_ARNS=$(aws elbv2 describe-load-balancers --query "LoadBalancers[?contains(LoadBalancerName, 'hyp-lb')].LoadBalancerArn" --output text)
     for lb in $LB_ARNS; do aws elbv2 delete-load-balancer --load-balancer-arn "$lb" || true; done
 
