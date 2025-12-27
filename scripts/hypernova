@@ -6,10 +6,16 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 TF_DIR="$ROOT_DIR/infra/terraform"
 K8S_DIR="$ROOT_DIR/k8s"
 
-function log() { echo -e "\033[0;36m[HYPERNOVA] $(date +'%H:%M:%S') | $1\033[0m"; }
+COLOR_CYAN='\033[0;36m'
+COLOR_RED='\033[0;31m'
+COLOR_GREEN='\033[0;32m'
+COLOR_RESET='\033[0m'
+
+function log() { echo -e "${COLOR_CYAN}[HYPERNOVA-LOG] $1${COLOR_RESET}"; }
+function error_log() { echo -e "${COLOR_RED}[HYPERNOVA-ERROR] $1${COLOR_RESET}"; }
 
 function bootstrap() {
-    log "📡 Detecting Cloud Identity..."
+    log "📡 Detecting Identity..."
     RUNNER_ARN=$(aws sts get-caller-identity --query Arn --output text)
     ACCOUNT_ID=$(echo $RUNNER_ARN | cut -d: -f5)
     [[ $RUNNER_ARN == *"assumed-role"* ]] && CLEAN_ARN="arn:aws:iam::$ACCOUNT_ID:role/$(echo $RUNNER_ARN | cut -d/ -f2)" || CLEAN_ARN=$RUNNER_ARN
@@ -21,7 +27,7 @@ function bootstrap() {
 
 function ignite() {
     bootstrap
-    log "🚀 Ignite Sequence: V9.0.0 (Compute-First Protocol)"
+    log "🚀 Ignite Sequence: V10.0.0"
     cd "$TF_DIR"
     rm -rf .terraform .terraform.lock.hcl
     terraform init "${INIT_OPTS[@]}" -reconfigure
@@ -32,12 +38,10 @@ function ignite() {
     ROLE_ARN=$(terraform output -raw lb_role_arn)
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
 
-    # --- THE LOBOTOMY: Kill any ghost webhooks from failed runs ---
-    log "🧹 Purging Ghost Webhooks (Clearing Path)..."
+    log "🧹 Purging Webhook Sentries..."
     kubectl delete mutatingwebhookconfiguration --all || true
-    kubectl delete validatingwebhookconfiguration --all || true
 
-    log "🛠️ Updating Repos..."
+    log "🛠️ Registering Repos..."
     helm repo add cilium https://helm.cilium.io/
     helm repo add eks https://aws.github.io/eks-charts
     helm repo add ray https://ray-project.github.io/kuberay-helm/
@@ -47,58 +51,50 @@ function ignite() {
     helm upgrade --install cilium cilium/cilium --version 1.16.5 -n kube-system \
       --set kubeProxyReplacement=true --set-string debug.verbose="" --wait=false
 
-    # --- COMPUTE FIRST: These do NOT depend on LoadBalancers ---
-    log "💉 Phase 2: Karpenter & KubeRay (Compute Foundation)..."
+    log "💉 Phase 2: Karpenter & KubeRay..."
     helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter --version 1.1.1 \
       -n karpenter --create-namespace --set settings.clusterName="$NAME" --wait=false
-    
     helm upgrade --install kuberay-operator ray/kuberay-operator --version 1.2.2 --wait=false
 
-    log "🏗️ Applying AI Forge Manifests..."
-    # Small buffer for API server to process Helm charts
-    sleep 20
-    kubectl apply -f "$K8S_DIR/core/karpenter-gpu-pool.yaml"
-    kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"
-
-    # --- NETWORKING LAST: Only needed for Demo ---
-    log "💉 Phase 3: AWS Load Balancer Controller (Final Layer)..."
+    log "💉 Phase 3: AWS LBC..."
     kubectl apply -f https://raw.githubusercontent.com/aws/eks-charts/master/stable/aws-load-balancer-controller/crds/crds.yaml
     helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system \
       --set clusterName="$NAME" --set serviceAccount.create=true \
-      --set serviceAccount.name=aws-load-balancer-controller \
       --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="$ROLE_ARN" \
       --set region=us-east-1 --set vpcId="$VPC_ID" \
-      --set webhookConfig.failurePolicy=Ignore \
-      --wait=false
+      --set webhookConfig.failurePolicy=Ignore --wait=false
 
-    log "✅ SYSTEM ARMED. Hypernova is stabilizing."
+    log "✅ SYSTEM ARMED. Run 'demo' once nodes appear."
 }
 
 function demo() {
     bootstrap
-    log "🎭 Launching Spectator Protocol (God-View)..."
-    cd "$TF_DIR"
-    
-    terraform init "${INIT_OPTS[@]}" -reconfigure > /dev/null
-    NAME=$(terraform output -raw cluster_name)
-    aws eks update-kubeconfig --region us-east-1 --name "$NAME"
+    log "🎭 Launching Spectator Protocol..."
+    aws eks update-kubeconfig --region us-east-1 --name "neural-hypernova"
 
-    log "⚔️  Clearing Webhook Sentries..."
+    # THE NODE-SENTRY: Wait for at least one node to join
+    log "⏳ Phase 0: Waiting for Brain Node to join cluster..."
+    local NODE_COUNT=0
+    while [ "$NODE_COUNT" -eq 0 ]; do
+        NODE_COUNT=$(kubectl get nodes --no-headers 2>/dev/null | wc -l || echo 0)
+        if [ "$NODE_COUNT" -gt 0 ]; then
+            log "✅ Node joined! Population: $NODE_COUNT"
+            break
+        fi
+        log "Still waiting for EC2 instances to register... (10s)"
+        sleep 10
+    done
+
+    log "⚔️  Clearing Webhook deadlocks..."
     kubectl delete mutatingwebhookconfiguration elbv2.k8s.aws-mutating-webhook-configuration --ignore-not-found
-    
-    log "🏗️ Re-applying Downsized Ray Manifest..."
+
+    log "🏗️ Applying Downsized Manifest..."
     kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"
 
-    log "⏳ Waiting for Ray Head Pod to initialize..."
-    # We wait 5 minutes, but provide feedback
-    if ! kubectl wait --for=condition=Ready pod -l ray.io/node-type=head --timeout=300s; then
-        error_log "❌ Ray Head failed to start. Dumping diagnostics..."
-        kubectl get pods -l ray.io/node-type=head
-        kubectl describe pod -l ray.io/node-type=head | grep -A 10 "Events:"
-        exit 1
-    fi
+    log "⏳ Phase 1: Waiting for Ray Head Pod..."
+    kubectl wait --for=condition=Ready pod -l ray.io/node-type=head --timeout=600s
 
-    log "🌐 Provisioning Public Dashboard NLB..."
+    log "🌐 Provisioning Dashboard NLB..."
     cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: Service
@@ -114,24 +110,15 @@ spec:
   ports: [{ name: dash, port: 8265, targetPort: 8265 }]
 EOF
 
-    log "⏳ Phase 1: DNS Identification..."
-    local URL=""
-    for i in {1..12}; do
+    log "⏳ Phase 2: DNS Propagation..."
+    URL=""
+    while [ -z "$URL" ]; do
         URL=$(kubectl get svc hypernova-dashboard-lb -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
-        [ ! -z "$URL" ] && break
         sleep 10
     done
-
-    log "⏳ Phase 2: Propagation Guard..."
-    until nslookup "$URL" > /dev/null 2>&1; do
-        log "Waiting for DNS propagation... (15s)"
-        sleep 15
-    done
-
-    echo -e "${COLOR_GREEN}----------------------------------------------------------------"
-    echo "🚀 NEURAL HYPERNOVA LIVE: http://$URL:8265"
-    echo "----------------------------------------------------------------${COLOR_RESET}"
+    log "🚀 DASHBOARD: http://$URL:8265"
 }
+
 function nuke() {
     bootstrap
     log "☢️ NUCLEAR RESET..."
@@ -139,17 +126,11 @@ function nuke() {
     rm -rf .terraform .terraform.lock.hcl
     terraform init "${INIT_OPTS[@]}" -reconfigure || true
     VPC_ID=$(terraform output -raw vpc_id 2>/dev/null || echo "")
-    CLUSTER_NAME="neural-hypernova"
-
     kubectl delete svc hypernova-dashboard-lb --ignore-not-found || true
-    aws eks delete-cluster --name "$CLUSTER_NAME" --region us-east-1 2>/dev/null || true
+    aws eks delete-cluster --name "neural-hypernova" --region "us-east-1" 2>/dev/null || true
     EIPS=$(aws ec2 describe-addresses --region us-east-1 --query "Addresses[?VpcId=='$VPC_ID'].AllocationId" --output text)
     for eip in $EIPS; do aws ec2 release-address --allocation-id "$eip" --region us-east-1 || true; done
     terraform destroy "${APPLY_OPTS[@]}" || true
-    if [ ! -z "$VPC_ID" ] && [ "$VPC_ID" != "null" ]; then
-        ENIS=$(aws ec2 describe-network-interfaces --filters "Name=vpc-id,Values=$VPC_ID" --query "NetworkInterfaces[*].NetworkInterfaceId" --output text)
-        for eni in $ENIS; do aws ec2 delete-network-interface --network-interface-id "$eni" || true; done
-    fi
     log "🌑 CLEAN."
 }
 
