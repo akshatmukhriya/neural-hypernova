@@ -19,12 +19,11 @@ function bootstrap() {
     BUCKET="hypernova-state-$ACCOUNT_ID"
     aws s3 mb "s3://$BUCKET" --region us-east-1 2>/dev/null || true
     INIT_OPTS=(-backend-config="bucket=$BUCKET")
-    APPLY_OPTS=(-var="runner_arn=$CLEAN_ARN" -auto-approve)
 }
 
 function ignite() {
     bootstrap
-    log "🚀 Ignite Sequence: V35.0.0 (Metadata Purge Protocol)"
+    log "🚀 Ignite Sequence: V36.0.0 (Clean Slate)"
     
     # Quota Recovery
     for eip in $(aws ec2 describe-addresses --query "Addresses[?AssociationId==null].AllocationId" --output text); do
@@ -32,18 +31,20 @@ function ignite() {
     done
 
     cd "$TF_DIR"
+    # THE NUCLEAR CLEAN: Force Terraform to forget everything local
     rm -rf .terraform .terraform.lock.hcl
     terraform init "${INIT_OPTS[@]}" -reconfigure
-    terraform apply "${APPLY_OPTS[@]}"
+    
+    log "🏗️ Synthesizing Infrastructure..."
+    terraform apply -auto-approve
+
     NAME=$(terraform output -raw cluster_name)
+    VPC_ID=$(terraform output -raw vpc_id)
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
 
-    log "🛠️ Registering Repos..."
-    helm repo add cilium https://helm.cilium.io/
-    helm repo add kuberay https://ray-project.github.io/kuberay-helm/
-    helm repo update
-
     log "💉 Phase 1: Cilium eBPF..."
+    helm repo add cilium https://helm.cilium.io/
+    helm repo update
     helm upgrade --install cilium cilium/cilium --version 1.16.5 -n kube-system \
       --set kubeProxyReplacement=true --set-string debug.verbose="" --wait=false
 
@@ -51,24 +52,21 @@ function ignite() {
     helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter --version 1.1.1 \
       -n karpenter --create-namespace --set settings.clusterName="$NAME" --wait=false
 
-    log "💉 Phase 3: KubeRay (Metadata Ghost Purge)..."
-    # THE SURGICAL FIX: Purge conflicting service account and metadata
-    kubectl delete sa kuberay-operator -n default --ignore-not-found
-    kubectl delete clusterrole kuberay-operator --ignore-not-found
-    kubectl delete clusterrolebinding kuberay-operator --ignore-not-found
-    
-    helm upgrade --install kuberay kuberay/kuberay-operator --version 1.2.2 --wait=false
+    log "💉 Phase 3: KubeRay..."
+    helm repo add ray https://ray-project.github.io/kuberay-helm/
+    helm repo update
+    helm upgrade --install kuberay ray/kuberay-operator --version 1.2.2 --wait=false
 
     log "🏗️ Applying Forge Manifests..."
     sleep 30
     kubectl apply -f "$K8S_DIR/core/karpenter-gpu-pool.yaml"
     kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"
-    log "✅ FORGE INITIALIZED."
+    log "✅ SYSTEM ARMED."
 }
 
 function demo() {
     bootstrap
-    log "🎭 Launching Spectator Protocol (Cloud-Native Bypass)..."
+    log "🎭 Launching Spectator Protocol..."
     cd "$TF_DIR"
     terraform init "${INIT_OPTS[@]}" -reconfigure > /dev/null
     NAME=$(terraform output -raw cluster_name)
@@ -114,7 +112,6 @@ function nuke() {
     rm -rf .terraform .terraform.lock.hcl
     terraform init "${INIT_OPTS[@]}" -reconfigure || true
     VPC_ID=$(terraform output -raw vpc_id 2>/dev/null || echo "")
-    RAND_ID=$(terraform output -raw random_id 2>/dev/null || echo "final")
     NAME=$(terraform output -raw cluster_name 2>/dev/null || echo "hypernova")
 
     LB_ARNS=$(aws elbv2 describe-load-balancers --query "LoadBalancers[?contains(LoadBalancerName, 'hyp-lb')].LoadBalancerArn" --output text)

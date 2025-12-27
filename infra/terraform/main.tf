@@ -1,4 +1,4 @@
-# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V35.0.0 ---
+# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V36.0.0 ---
 
 terraform {
   required_version = ">= 1.5.0"
@@ -13,12 +13,11 @@ terraform {
   }
 }
 
-provider "aws" {
-  region = "us-east-1"
-}
+provider "aws" { region = "us-east-1" }
 
+# THE GHOST-BREAKER: 8 characters for absolute uniqueness
 resource "random_string" "id" {
-  length  = 4
+  length  = 8
   special = false
   upper   = false
 }
@@ -41,7 +40,6 @@ module "vpc" {
 
   enable_nat_gateway = true
   single_nat_gateway = true 
-  public_subnet_tags = { "kubernetes.io/role/elb" = 1 }
 }
 
 # --- 2. THE BRAIN (EKS 1.31) ---
@@ -54,13 +52,13 @@ module "eks" {
   vpc_id          = module.vpc.vpc_id
   subnet_ids      = module.vpc.private_subnets
 
-  # --- BYPASSING MODULE BUGS ---
-  # We remove ALL encryption/KMS/Log blocks to ensure the module doesn't crash.
-  create_kms_key               = false
-  create_cloudwatch_log_group  = false
-  enable_irsa                  = true
-  authentication_mode          = "API_AND_CONFIG_MAP"
+  # --- INDUSTRIAL DEFAULTS ---
+  # We remove ALL create_kms_key and cluster_encryption_config blocks.
+  # This allows the module to use its internal, verified logic.
+  
+  authentication_mode                      = "API_AND_CONFIG_MAP"
   enable_cluster_creator_admin_permissions = true
+  cluster_endpoint_public_access           = true
 
   node_security_group_additional_rules = {
     ingress_ray = {
@@ -83,7 +81,7 @@ module "eks" {
 
   eks_managed_node_groups = {
     brain = {
-      name           = "brain-pool-${random_string.id.result}"
+      name           = "brain-${random_string.id.result}"
       instance_types = ["t3.large"]
       ami_type       = "AL2023_x86_64_STANDARD"
       min_size       = 1
@@ -93,7 +91,6 @@ module "eks" {
   }
 }
 
-# --- 3. OUTPUTS ---
 output "cluster_name"    { value = module.eks.cluster_name }
 output "vpc_id"          { value = module.vpc.vpc_id }
 output "public_subnets"  { value = module.vpc.public_subnets }
