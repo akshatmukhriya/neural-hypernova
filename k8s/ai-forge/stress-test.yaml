@@ -1,16 +1,17 @@
 apiVersion: ray.io/v1
 kind: RayJob
 metadata:
-  name: hypernova-gpu-surge
+  name: hypernova-surge-demo
   labels:
-    hypernova-controlled: "true" # Our Spectator Protocol recognizes this
+    hypernova: "true"
 spec:
-  # The atomic unit of work: Submit a distributed task requiring 2 GPUs
+  # The Sovereign Task: Demand 2 GPUs for a distributed Python surge
   entrypoint: |
     python -c "import ray; ray.init(); @ray.remote(num_gpus=1) def work(): import time; time.sleep(120); return 1; ray.get([work.remote() for _ in range(2)])"
   rayClusterSpec:
     rayVersion: '2.9.0'
     headGroupSpec:
+      # THE CRITICAL FIX: Explicitly defining start parameters for the Head
       rayStartParams:
         dashboard-host: "0.0.0.0"
         block: "true"
@@ -18,7 +19,7 @@ spec:
         spec:
           containers:
             - name: ray-head
-              image: rayproject/ray:2.9.0-py310 
+              image: rayproject/ray:2.9.0-py310 # Slim image for fast-boot
               ports:
                 - containerPort: 8265
                 - containerPort: 6379
@@ -31,18 +32,17 @@ spec:
                   cpu: "500m"
                   memory: "1Gi"
     workerGroupSpecs:
-      - replicas: 0 # Start at zero to trigger Karpenter JIT provisioning
+      - replicas: 0 # Start at 0 to force Karpenter JIT scaling
         minReplicas: 0
         maxReplicas: 5
         groupName: gpu-group
-        # THE FIX: Explicit parameters required by KubeRay v1 Schema
-        rayStartParams: {} 
+        rayStartParams: {} # Required mapping
         template:
           spec:
-            runtimeClassName: nvidia 
+            runtimeClassName: nvidia # Triggers Karpenter and NVIDIA drivers
             containers:
               - name: ray-worker
-                image: rayproject/ray-ml:2.9.0-py310-gpu
+                image: rayproject/ray-ml:2.9.0-py310-gpu # Heavy ML image for workers
                 resources:
                   limits:
                     nvidia.com/gpu: 1
