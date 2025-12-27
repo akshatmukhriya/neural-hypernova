@@ -1,4 +1,4 @@
-# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V5.0.0 ---
+# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V6.0.0 ---
 
 terraform {
   required_version = ">= 1.5.0"
@@ -20,7 +20,6 @@ variable "runner_arn" {
 }
 
 data "aws_caller_identity" "current" {}
-
 data "http" "lb_policy" {
   url = "https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/main/docs/install/iam_policy.json"
 }
@@ -39,9 +38,7 @@ module "vpc" {
   enable_nat_gateway = true
   single_nat_gateway = true 
 
-  public_subnet_tags = {
-    "kubernetes.io/role/elb" = 1
-  }
+  public_subnet_tags = { "kubernetes.io/role/elb" = 1 }
   private_subnet_tags = { 
     "kubernetes.io/role/internal-elb" = 1
     "karpenter.sh/discovery"          = "neural-hypernova" 
@@ -64,7 +61,16 @@ module "eks" {
 
   node_security_group_enable_recommended_rules = true
 
+  # UNIVERSAL VPC ACCESS: Bypasses SG-ID Handshake lag
   node_security_group_additional_rules = {
+    ingress_vpc_webhook = {
+      description = "Allow EKS Control Plane to reach Webhooks"
+      protocol    = "tcp"
+      from_port   = 9443
+      to_port     = 9443
+      type        = "ingress"
+      cidr_blocks = ["10.0.0.0/16"] # Match VPC CIDR
+    }
     ingress_ray = {
       description = "Ray Dashboard"
       protocol    = "tcp"
@@ -73,14 +79,6 @@ module "eks" {
       type        = "ingress"
       cidr_blocks = ["0.0.0.0/0"]
     }
-    ingress_vpc = {
-      description = "VPC Internal"
-      protocol    = "-1"
-      from_port   = 0
-      to_port     = 0
-      type        = "ingress"
-      cidr_blocks = ["10.0.0.0/16"]
-    }
   }
 
   eks_managed_node_groups = {
@@ -88,7 +86,7 @@ module "eks" {
       instance_types = ["t3.medium"]
       ami_type       = "AL2023_x86_64_STANDARD"
       min_size       = 1
-      max_size       = 2
+      max_size       = 1
       desired_size   = 1
     }
   }
@@ -106,32 +104,22 @@ module "eks" {
   }
 }
 
-# --- 3. RAW IAM FOR LOAD BALANCER CONTROLLER (The Unbreakable Fix) ---
+# --- 3. IAM FOR LBC ---
 resource "aws_iam_policy" "lb_controller" {
-  name        = "AWSLBCPolicy-Hypernova"
-  description = "Permissions for AWS Load Balancer Controller"
-  policy      = data.http.lb_policy.response_body
+  name   = "AWSLBCPolicy-Hypernova"
+  policy = data.http.lb_policy.response_body
 }
 
 resource "aws_iam_role" "lb_controller" {
   name = "lb-controller-hypernova"
-
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Principal = {
-          Federated = module.eks.oidc_provider_arn
-        }
-        Action = "sts:AssumeRoleWithWebIdentity"
-        Condition = {
-          StringEquals = {
-            "${module.eks.oidc_provider}:sub" = "system:serviceaccount:kube-system:aws-load-balancer-controller"
-          }
-        }
-      }
-    ]
+    Statement = [{
+      Effect = "Allow"
+      Principal = { Federated = module.eks.oidc_provider_arn }
+      Action = "sts:AssumeRoleWithWebIdentity"
+      Condition = { StringEquals = { "${module.eks.oidc_provider}:sub" = "system:serviceaccount:kube-system:aws-load-balancer-controller" }}
+    }]
   })
 }
 
@@ -140,7 +128,6 @@ resource "aws_iam_role_policy_attachment" "lb_controller_attach" {
   role       = aws_iam_role.lb_controller.name
 }
 
-# --- 4. OUTPUTS ---
 output "cluster_name" { value = module.eks.cluster_name }
 output "region"       { value = "us-east-1" }
 output "vpc_id"       { value = module.vpc.vpc_id }

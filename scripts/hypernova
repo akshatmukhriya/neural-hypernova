@@ -28,7 +28,7 @@ function bootstrap() {
 
 function ignite() {
     bootstrap
-    log "🚀 Ignite Sequence: V5.1.0 (Readiness Protocol)"
+    log "🚀 Ignite Sequence: V6.0.0 (The Fail-Open Protocol)"
     cd "$TF_DIR"
     
     rm -rf .terraform .terraform.lock.hcl
@@ -40,55 +40,42 @@ function ignite() {
     ROLE_ARN=$(terraform output -raw lb_role_arn)
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
 
-    log "🛠️ Registering Repos..."
+    log "🛠️ Registering Global Repos..."
     helm repo add cilium https://helm.cilium.io/
     helm repo add eks https://aws.github.io/eks-charts
-    helm repo add ray https://ray-project.github.io/kuberay-helm/
+    helm repo add ray-project https://ray-project.github.io/kuberay-helm/
     helm repo update
 
-    log "💉 Phase 1: Injecting Cilium eBPF..."
+    log "💉 Phase 1: Cilium eBPF..."
     helm upgrade --install cilium cilium/cilium --version 1.16.5 -n kube-system \
       --set kubeProxyReplacement=true --set-string debug.verbose="" --wait
 
-    log "💉 Phase 2: Injecting AWS LBC..."
-    # Force clean existing webhooks to prevent ghost deadlocks
+    log "💉 Phase 2: AWS Load Balancer Controller (Atomic)..."
+    # Kill stale webhooks to ensure a clean path
     kubectl delete mutatingwebhookconfiguration elbv2.k8s.aws-mutating-webhook-configuration --ignore-not-found
     kubectl apply -f https://raw.githubusercontent.com/aws/eks-charts/master/stable/aws-load-balancer-controller/crds/crds.yaml
     
+    # THE UNICORN FIX: Disable failure blocking
     helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system \
       --set clusterName="$NAME" --set serviceAccount.create=true \
       --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="$ROLE_ARN" \
       --set region=us-east-1 --set vpcId="$VPC_ID" \
-      --set webhookConfig.failurePolicy=Ignore
+      --set webhookConfig.failurePolicy=Ignore \
+      --set hostNetwork=true \
+      --wait
 
-    # --- THE CRITICAL READINESS GATE ---
-    log "⏳ Phase 2.5: Waiting for LBC Webhook Endpoints..."
-    # 1. Wait for Pod to be Ready
-    kubectl wait --for=condition=Available deployment/aws-load-balancer-controller -n kube-system --timeout=120s
-    
-    # 2. Wait for Service Endpoints (The 'No Endpoints' Fix)
-    local ENDPOINTS=""
-    for i in {1..12}; do
-        ENDPOINTS=$(kubectl get endpoints aws-load-balancer-webhook-service -n kube-system -o jsonpath='{$.subsets[*].addresses[*].ip}' 2>/dev/null || echo "")
-        if [ ! -z "$ENDPOINTS" ]; then
-            log "✅ LBC Webhook Endpoints Active: $ENDPOINTS"
-            break
-        fi
-        log "Waiting for Webhook Endpoints to register... ($((i*5))s)"
-        sleep 5
-    done
-
-    log "💉 Phase 3: Injecting Karpenter..."
+    log "💉 Phase 3: Karpenter..."
+    # FailurePolicy=Ignore ensures this command will NOT time out
     helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter --version 1.1.1 \
       -n karpenter --create-namespace --set settings.clusterName="$NAME" --wait
 
-    log "💉 Phase 4: Injecting KubeRay..."
-    helm upgrade --install kuberay ray/kuberay-operator --version 1.2.2 --wait
+    log "💉 Phase 4: KubeRay..."
+    helm upgrade --install kuberay-operator ray-project/kuberay-operator --version 1.2.2 --wait
 
-    log "🏗️ Final Manifest Application..."
+    log "🏗️ Manifests..."
     kubectl apply -f "$K8S_DIR/core/karpenter-gpu-pool.yaml"
     kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"
-    log "✅ NEURAL HYPERNOVA IS ARMED."
+    log "✅ SYSTEM ARMED."
 }
 
 function nuke() {
