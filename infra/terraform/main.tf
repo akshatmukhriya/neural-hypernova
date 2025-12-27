@@ -1,4 +1,4 @@
-# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V21.0.0 ---
+# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V22.0.0 ---
 
 terraform {
   required_version = ">= 1.5.0"
@@ -37,17 +37,14 @@ module "vpc" {
   enable_nat_gateway = true
   single_nat_gateway = true 
 
-  # We keep these for completeness, though our script will bypass LBC
   public_subnet_tags = { "kubernetes.io/role/elb" = 1 }
-  private_subnet_tags = { "karpenter.sh/discovery" = "hypernova-${random_string.id.result}" }
 }
 
-# --- 2. DEDICATED SECURITY GROUP ---
+# --- 2. SECURITY GROUP (NLB BYPASS GATE) ---
 resource "aws_security_group" "forge_sg" {
-  name_prefix = "hypernova-forge-"
+  name        = "hypernova-forge-sg-${random_string.id.result}"
   vpc_id      = module.vpc.vpc_id
 
-  # Allow all VPC internal traffic
   ingress {
     from_port   = 0
     to_port     = 0
@@ -55,9 +52,8 @@ resource "aws_security_group" "forge_sg" {
     cidr_blocks = ["10.0.0.0/16"]
   }
 
-  # THE FIX: Allow Ray Dashboard NodePort from the internet (for the NLB)
   ingress {
-    from_port   = 30265
+    from_port   = 30265 # NodePort for Dashboard
     to_port     = 30265
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
@@ -71,7 +67,7 @@ resource "aws_security_group" "forge_sg" {
   }
 }
 
-# --- 3. THE BRAIN (EKS) ---
+# --- 3. EKS CLUSTER ---
 module "eks" {
   source  = "terraform-aws-modules/eks/aws"
   version = "20.24.0"
@@ -98,7 +94,7 @@ module "eks" {
   }
 }
 
-# --- 4. OUTPUTS ---
+# --- 4. OUTPUTS (The Data Plane) ---
 output "cluster_name"    { value = module.eks.cluster_name }
 output "vpc_id"          { value = module.vpc.vpc_id }
 output "public_subnets"  { value = module.vpc.public_subnets }
