@@ -24,32 +24,34 @@ function bootstrap() {
 
 function ignite() {
     bootstrap
-    log "🚀 Ignite Sequence: V25.0.0"
+    log "🚀 Ignite Sequence: V26.0.0 (The Hardware Bypass)"
     cd "$TF_DIR"
     rm -rf .terraform .terraform.lock.hcl
     terraform init "${INIT_OPTS[@]}" -reconfigure
     terraform apply "${APPLY_OPTS[@]}"
+
     NAME=$(terraform output -raw cluster_name)
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
 
-    log "💉 Phase 1: Cilium eBPF..."
+    log "🛠️ Registering AI Stack Repos..."
     helm repo add cilium https://helm.cilium.io/
+    helm repo add ray https://ray-project.github.io/kuberay-helm/
     helm repo update
+
+    log "💉 Phase 1: Cilium eBPF..."
     helm upgrade --install cilium cilium/cilium --version 1.16.5 -n kube-system \
       --set kubeProxyReplacement=true --set-string debug.verbose="" --wait=false
 
     log "💉 Phase 2: Karpenter & Ray..."
     helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter --version 1.1.1 \
       -n karpenter --create-namespace --set settings.clusterName="$NAME" --wait=false
-    helm repo add ray https://ray-project.github.io/kuberay-helm/
-    helm repo update
     helm upgrade --install kuberay kuberay/kuberay-operator --version 1.2.2 --wait=false
 
     log "🏗️ Applying Forge Manifests..."
     sleep 20
     kubectl apply -f "$K8S_DIR/core/karpenter-gpu-pool.yaml"
     kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"
-    log "✅ SYSTEM ARMED."
+    log "✅ SYSTEM ARMED. Node joining in background."
 }
 
 function demo() {
@@ -57,13 +59,15 @@ function demo() {
     log "🎭 Launching Spectator Protocol (Hardware Sentry Mode)..."
     cd "$TF_DIR"
     terraform init "${INIT_OPTS[@]}" -reconfigure > /dev/null
+    
+    # Discovery
     NAME=$(terraform output -raw cluster_name)
     VPC_ID=$(terraform output -raw vpc_id)
     RAND_ID=$(terraform output -raw random_id)
     SUBNETS=$(terraform output -json public_subnets | jq -r '.[]' | paste -sd " " -)
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
 
-    log "🌐 Step 1: Deploying Dashboard NodePort..."
+    log "🌐 Step 1: Deploying Dashboard NodePort (Total Bypass)..."
     cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: Service
@@ -71,65 +75,72 @@ metadata:
   name: hypernova-dashboard-nodeport
 spec:
   type: NodePort
-  selector: { ray.io/node-type: head }
+  selector: { ray.io/node-type: head, ray.io/cluster: hypernova-ray }
   ports: [{ nodePort: 30265, port: 8265, targetPort: 8265 }]
 EOF
 
-    log "🌐 Step 2: Ensuring Ray Pod is Ready..."
+    log "⏳ Phase 0: Waiting for Ray Pod Readiness..."
     kubectl wait --for=condition=Ready pod -l ray.io/node-type=head --timeout=300s
 
-    log "🌐 Step 3: Provisioning Physical NLB..."
+    log "🌐 Step 2: Provisioning Physical NLB via CLI..."
     LB_NAME="hypernova-lb-$RAND_ID"
     LB_ARN=$(aws elbv2 create-load-balancer --name "$LB_NAME" --subnets $SUBNETS --type network --query "LoadBalancers[0].LoadBalancerArn" --output text)
-    
-    # Enable Cross-Zone for reliability
     aws elbv2 modify-load-balancer-attributes --load-balancer-arn "$LB_ARN" --attributes Key=load_balancing.cross_zone.enabled,Value=true > /dev/null
 
-    log "🌐 Step 4: Creating Target Group..."
+    log "🌐 Step 3: Configuring Target Group..."
     TG_ARN=$(aws elbv2 create-target-group --name "hypernova-tg-$RAND_ID" --protocol TCP --port 30265 --vpc-id "$VPC_ID" --target-type instance --query "TargetGroups[0].TargetGroupArn" --output text)
     
-    log "🌐 Step 5: Registering Nodes..."
+    log "🌐 Step 4: Registering Compute Targets..."
     INSTANCES=$(aws ec2 describe-instances --filters "Name=tag:kubernetes.io/cluster/$NAME,Values=owned" "Name=instance-state-name,Values=running" --query "Reservations[*].Instances[*].InstanceId" --output text)
     for ins in $INSTANCES; do
         aws elbv2 register-targets --target-group-arn "$TG_ARN" --targets Id="$ins" || true
     done
 
-    log "🌐 Step 6: Finalizing Listener..."
+    log "🌐 Step 5: Finalizing Listener..."
     aws elbv2 create-listener --load-balancer-arn "$LB_ARN" --protocol TCP --port 8265 --default-actions Type=forward,TargetGroupArn="$TG_ARN" 2>/dev/null || true
 
-    log "⏳ Phase 3: Hardware Health Sentry (Waiting for 'healthy' status)..."
+    log "⏳ Phase 3: Hardware Health Sentry..."
     local HEALTH="unhealthy"
     while [ "$HEALTH" != "healthy" ]; do
-        HEALTH=$(aws elbv2 describe-target-health --target-group-arn "$TG_ARN" --query "TargetHealthDescriptions[0].TargetHealth.State" --output text 2>/dev/null || echo "initial")
+        HEALTH=$(aws elbv2 describe-target-health --target-group-arn "$TG_ARN" --query "TargetHealthDescriptions[0].TargetHealth.State" --output text 2>/dev/null || echo "initializing")
         if [ "$HEALTH" == "healthy" ]; then
             log "✅ Hardware Link Established!"
             break
         fi
-        log "Target status: $HEALTH... (NLB warming up, usually 2-3 mins)"
+        log "Current Status: $HEALTH... (NLB warming up, ~120s)"
         sleep 20
     done
 
     URL=$(aws elbv2 describe-load-balancers --load-balancer-arns "$LB_ARN" --query "LoadBalancers[0].DNSName" --output text)
     echo -e "${COLOR_GREEN}----------------------------------------------------------------"
     echo "🚀 NEURAL HYPERNOVA IS LIVE"
-    echo "URL: http://$URL:8265"
+    echo "DASHBOARD URL: http://$URL:8265"
     echo "----------------------------------------------------------------${COLOR_RESET}"
 }
 
 function nuke() {
     bootstrap
-    log "☢️ NUCLEAR RESET..."
+    log "☢️ SCORCHED EARTH..."
     cd "$TF_DIR"
     rm -rf .terraform .terraform.lock.hcl
     terraform init "${INIT_OPTS[@]}" -reconfigure || true
+    
     VPC_ID=$(terraform output -raw vpc_id 2>/dev/null || echo "")
     RAND_ID=$(terraform output -raw random_id 2>/dev/null || echo "final")
     NAME=$(terraform output -raw cluster_name 2>/dev/null || echo "hypernova")
+
+    log "1. Dismantling Physical NLB..."
+    LB_ARN=$(aws elbv2 describe-load-balancers --names "hypernova-lb-$RAND_ID" --query "LoadBalancers[0].LoadBalancerArn" --output text 2>/dev/null || echo "")
+    [ ! -z "$LB_ARN" ] && aws elbv2 delete-load-balancer --load-balancer-arn "$LB_ARN" && sleep 30
+    TG_ARN=$(aws elbv2 describe-target-groups --names "hypernova-tg-$RAND_ID" --query "TargetGroups[0].TargetGroupArn" --output text 2>/dev/null || echo "")
+    [ ! -z "$TG_ARN" ] && aws elbv2 delete-target-group --target-group-arn "$TG_ARN"
+
+    log "2. Purging Cluster..."
     aws eks delete-cluster --name "$NAME" --region us-east-1 2>/dev/null || true
     for eip in $(aws ec2 describe-addresses --region us-east-1 --query "Addresses[?VpcId=='$VPC_ID'].AllocationId" --output text); do
       aws ec2 release-address --allocation-id "$eip" --region us-east-1 || true
     done
-    terraform destroy "${APPLY_OPTS[@]}" || true
+    terraform destroy -auto-approve || true
     log "🌑 CLEAN."
 }
 
