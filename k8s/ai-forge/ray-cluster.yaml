@@ -6,7 +6,7 @@ spec:
   rayVersion: '2.9.0'
   headGroupSpec:
     rayStartParams: 
-      dashboard-host: "0.0.0.0" # This MUST be 0.0.0.0
+      dashboard-host: "0.0.0.0"
       include-dashboard: "true"
     template:
       spec:
@@ -14,18 +14,25 @@ spec:
           - name: ray-head
             image: rayproject/ray-ml:2.9.0-py310-gpu
             ports:
-              - containerPort: 8265 # Dashboard
-              - containerPort: 6379 # GCS
-              - containerPort: 10001 # Client
+              - containerPort: 8265
+              - containerPort: 6379
+              - containerPort: 10001
             resources:
-              limits: { cpu: "2", memory: "8Gi" }
+              # FIXED: Reduced to fit on t3.medium (4GB RAM)
+              limits:
+                cpu: "1"
+                memory: "2Gi"
+              requests:
+                cpu: "500m"
+                memory: "1Gi"
   workerGroupSpecs:
-    - replicas: 2 # Scale this to 1000 for a real demo
+    - replicas: 2
       groupName: gpu-group
       rayStartParams: {}
       template:
         spec:
-          runtimeClassName: nvidia # Uses NVIDIA runtime
+          # Karpenter will see this and spawn G5/P4 instances
+          runtimeClassName: nvidia 
           containers:
             - name: ray-worker
               image: rayproject/ray-ml:2.9.0-py310-gpu
@@ -34,4 +41,3 @@ spec:
                   nvidia.com/gpu: 1
                   cpu: "4"
                   memory: "16Gi"
-                  
