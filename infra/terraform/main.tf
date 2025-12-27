@@ -1,4 +1,4 @@
-# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V15.0.0 ---
+# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V16.0.0 ---
 
 terraform {
   required_version = ">= 1.5.0"
@@ -15,7 +15,6 @@ terraform {
 
 provider "aws" { region = "us-east-1" }
 
-# THE GHOST-BREAKER: 6 characters to ensure zero naming collision
 resource "random_string" "id" {
   length  = 6
   special = false
@@ -27,7 +26,6 @@ data "http" "lb_policy" {
   url = "https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/main/docs/install/iam_policy.json"
 }
 
-# --- 1. NETWORK (Isolation) ---
 module "vpc" {
   source  = "terraform-aws-modules/vpc/aws"
   version = "5.2.0"
@@ -48,7 +46,6 @@ module "vpc" {
   }
 }
 
-# --- 2. THE BRAIN (EKS 1.31) ---
 module "eks" {
   source  = "terraform-aws-modules/eks/aws"
   version = "20.24.0"
@@ -58,16 +55,12 @@ module "eks" {
   vpc_id          = module.vpc.vpc_id
   subnet_ids      = module.vpc.private_subnets
 
-  # GHOST-PROOFING: Neutralize global collisions
   create_kms_key              = false
   create_cloudwatch_log_group = false
   cluster_encryption_config   = {} 
 
   authentication_mode            = "API_AND_CONFIG_MAP"
   cluster_endpoint_public_access = true
-
-  # THE COLLISION FIX: EKS creates the Access Entry for us. 
-  # We do NOT add a manual 'runner' block in access_entries.
   enable_cluster_creator_admin_permissions = true
 
   node_security_group_enable_recommended_rules = true
@@ -93,7 +86,6 @@ module "eks" {
   }
 }
 
-# --- 3. IAM (Identity) ---
 resource "aws_iam_policy" "lbc" {
   name        = "AWSLBCPolicy-${random_string.id.result}"
   policy      = data.http.lb_policy.response_body
@@ -117,7 +109,6 @@ resource "aws_iam_role_policy_attachment" "lbc" {
   role       = aws_iam_role.lbc.name
 }
 
-# --- 4. OUTPUTS (The Interface) ---
 output "cluster_name" { value = module.eks.cluster_name }
 output "vpc_id"       { value = module.vpc.vpc_id }
 output "lb_role_arn"  { value = aws_iam_role.lbc.arn }

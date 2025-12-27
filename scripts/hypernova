@@ -7,7 +7,6 @@ TF_DIR="$ROOT_DIR/infra/terraform"
 K8S_DIR="$ROOT_DIR/k8s"
 
 COLOR_CYAN='\033[0;36m'
-COLOR_RED='\033[0;31m'
 COLOR_GREEN='\033[0;32m'
 COLOR_RESET='\033[0m'
 
@@ -20,23 +19,14 @@ function bootstrap() {
     BUCKET="hypernova-state-$ACCOUNT_ID"
     aws s3 mb "s3://$BUCKET" --region us-east-1 2>/dev/null || true
     INIT_OPTS=(-backend-config="bucket=$BUCKET")
-    
-    log "🧹 Recovering IP Quota..."
-    for eip in $(aws ec2 describe-addresses --query "Addresses[?AssociationId==null].AllocationId" --output text); do
-      aws ec2 release-address --allocation-id "$eip" --region us-east-1 || true
-    done
 }
 
 function ignite() {
     bootstrap
-    log "🚀 Ignite Sequence: V15.0.0 (Native Auth Protocol)"
+    log "🚀 Ignite Sequence: V16.0.0 (Compute-First Protocol)"
     cd "$TF_DIR"
-    
-    # Force clean context to ensure random_string generates fresh
     rm -rf .terraform .terraform.lock.hcl
     terraform init "${INIT_OPTS[@]}" -reconfigure
-    
-    log "🏗️ Synthesizing Sovereign Infrastructure..."
     terraform apply -auto-approve
 
     NAME=$(terraform output -raw cluster_name)
@@ -44,48 +34,60 @@ function ignite() {
     ROLE_ARN=$(terraform output -raw lb_role_arn)
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
 
-    log "💉 Phase 1: Cilium eBPF..."
+    # --- THE LOBOTOMY: Wipe any ghost webhooks from failed runs ---
+    log "🧹 Purging Ghost Webhooks..."
+    kubectl delete mutatingwebhookconfiguration --all || true
+    kubectl delete validatingwebhookconfiguration --all || true
+
+    log "🛠️ Updating Repos..."
     helm repo add cilium https://helm.cilium.io/
+    helm repo add eks https://aws.github.io/eks-charts
+    helm repo add ray https://ray-project.github.io/kuberay-helm/
     helm repo update
+
+    log "💉 Phase 1: Cilium eBPF..."
     helm upgrade --install cilium cilium/cilium --version 1.16.5 -n kube-system \
       --set kubeProxyReplacement=true --set-string debug.verbose="" --wait=false
 
-    log "💉 Phase 2: AWS Load Balancer Controller..."
-    kubectl delete mutatingwebhookconfiguration elbv2.k8s.aws-mutating-webhook-configuration --ignore-not-found
+    # --- THE COMPUTE-FIRST BYPASS ---
+    log "💉 Phase 2: Karpenter & KubeRay..."
+    # We install these BEFORE the Load Balancer Controller. 
+    # There is no webhook present yet, so they install with ZERO resistance.
+    helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter --version 1.1.1 \
+      -n karpenter --create-namespace --set settings.clusterName="$NAME" --wait=false
+    
+    helm upgrade --install kuberay-operator ray/kuberay-operator --version 1.2.2 --wait=false
+
+    log "🏗️ Applying Forge Manifests..."
+    sleep 20
+    kubectl apply -f "$K8S_DIR/core/karpenter-gpu-pool.yaml"
+    kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"
+
+    # --- FINAL LAYER: NETWORKING ---
+    log "💉 Phase 3: AWS Load Balancer Controller..."
     kubectl apply -f https://raw.githubusercontent.com/aws/eks-charts/master/stable/aws-load-balancer-controller/crds/crds.yaml
-    helm repo add eks https://aws.github.io/eks-charts
-    helm repo update
     helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system \
       --set clusterName="$NAME" --set serviceAccount.create=true \
       --set serviceAccount.name=aws-load-balancer-controller \
       --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="$ROLE_ARN" \
       --set region=us-east-1 --set vpcId="$VPC_ID" \
-      --set webhookConfig.failurePolicy=Ignore --wait=false
+      --set webhookConfig.failurePolicy=Ignore \
+      --wait=false
 
-    log "💉 Phase 3: Karpenter & AI Forge..."
-    helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter --version 1.1.1 \
-      -n karpenter --create-namespace --set settings.clusterName="$NAME" --wait=false
-    helm repo add ray https://ray-project.github.io/kuberay-helm/
-    helm repo update
-    helm upgrade --install kuberay-operator ray/kuberay-operator --version 1.2.2 --wait=false
-
-    log "🏗️ Applying Neural Manifests..."
-    sleep 30
-    kubectl apply -f "$K8S_DIR/core/karpenter-gpu-pool.yaml"
-    kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"
-    
-    log "✅ SYSTEM ARMED. Hypernova is converging."
+    log "✅ SYSTEM ARMED. Hypernova is now stable."
 }
 
 function demo() {
     bootstrap
-    log "🎭 Spectator Protocol..."
-    cd "$TF_DIR"
-    NAME=$(terraform output -raw cluster_name)
+    log "🎭 Spectator Mode..."
+    NAME=$(cd "$TF_DIR" && terraform output -raw cluster_name)
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
     
-    log "🌐 Exposing Dashboard NLB..."
-    cat <<EOF | kubectl apply -f -
+    # We remove the webhooks again right before applying the demo service
+    # just in case they are still in a 'Fail' state.
+    kubectl delete mutatingwebhookconfiguration elbv2.k8s.aws-mutating-webhook-configuration --ignore-not-found
+
+    kubectl apply -f - <<EOF
 apiVersion: v1
 kind: Service
 metadata:
@@ -93,12 +95,12 @@ metadata:
   annotations:
     service.beta.kubernetes.io/aws-load-balancer-type: external
     service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: instance
-    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
 spec:
   type: LoadBalancer
   selector: { ray.io/node-type: head }
   ports: [{ name: dash, port: 8265, targetPort: 8265 }]
 EOF
+    log "Waiting for DNS..."
     URL=""
     while [ -z "$URL" ]; do
         URL=$(kubectl get svc hypernova-dashboard-lb -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
@@ -109,23 +111,18 @@ EOF
 
 function nuke() {
     bootstrap
-    log "☢️ SCORCHED EARTH..."
+    log "☢️ NUCLEAR RESET..."
     cd "$TF_DIR"
     rm -rf .terraform .terraform.lock.hcl
     terraform init "${INIT_OPTS[@]}" -reconfigure || true
-    
     VPC_ID=$(terraform output -raw vpc_id 2>/dev/null || echo "")
     NAME=$(terraform output -raw cluster_name 2>/dev/null || echo "hypernova")
 
-    log "1. CLI Purge..."
     kubectl delete svc hypernova-dashboard-lb --ignore-not-found || true
     aws eks delete-cluster --name "$NAME" --region us-east-1 2>/dev/null || true
-    
-    log "2. Resource Release..."
-    EIPS=$(aws ec2 describe-addresses --region us-east-1 --query "Addresses[?VpcId=='$VPC_ID'].AllocationId" --output text)
-    for eip in $EIPS; do aws ec2 release-address --allocation-id "$eip" --region us-east-1 || true; done
-
-    log "3. Terraform Destroy..."
+    for eip in $(aws ec2 describe-addresses --region us-east-1 --query "Addresses[?VpcId=='$VPC_ID'].AllocationId" --output text); do
+      aws ec2 release-address --allocation-id "$eip" --region us-east-1 || true
+    done
     terraform destroy -auto-approve || true
     log "🌑 CLEAN."
 }
