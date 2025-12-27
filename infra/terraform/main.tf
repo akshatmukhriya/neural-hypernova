@@ -1,4 +1,4 @@
-# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V6.0.0 ---
+# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V7.0.0 ---
 
 terraform {
   required_version = ">= 1.5.0"
@@ -38,6 +38,7 @@ module "vpc" {
   enable_nat_gateway = true
   single_nat_gateway = true 
 
+  # MANDATORY FOR LBC DISCOVERY
   public_subnet_tags = { "kubernetes.io/role/elb" = 1 }
   private_subnet_tags = { 
     "kubernetes.io/role/internal-elb" = 1
@@ -61,15 +62,14 @@ module "eks" {
 
   node_security_group_enable_recommended_rules = true
 
-  # UNIVERSAL VPC ACCESS: Bypasses SG-ID Handshake lag
   node_security_group_additional_rules = {
-    ingress_vpc_webhook = {
-      description = "Allow EKS Control Plane to reach Webhooks"
-      protocol    = "tcp"
-      from_port   = 9443
-      to_port     = 9443
+    ingress_all_vpc = {
+      description = "Allow all VPC internal traffic"
+      protocol    = "-1"
+      from_port   = 0
+      to_port     = 0
       type        = "ingress"
-      cidr_blocks = ["10.0.0.0/16"] # Match VPC CIDR
+      cidr_blocks = ["10.0.0.0/16"]
     }
     ingress_ray = {
       description = "Ray Dashboard"
@@ -104,7 +104,7 @@ module "eks" {
   }
 }
 
-# --- 3. IAM FOR LBC ---
+# --- 3. IAM FOR LBC (PRECISION IDENTITY) ---
 resource "aws_iam_policy" "lb_controller" {
   name   = "AWSLBCPolicy-Hypernova"
   policy = data.http.lb_policy.response_body
@@ -118,7 +118,9 @@ resource "aws_iam_role" "lb_controller" {
       Effect = "Allow"
       Principal = { Federated = module.eks.oidc_provider_arn }
       Action = "sts:AssumeRoleWithWebIdentity"
-      Condition = { StringEquals = { "${module.eks.oidc_provider}:sub" = "system:serviceaccount:kube-system:aws-load-balancer-controller" }}
+      Condition = { StringEquals = { 
+        "${module.eks.oidc_provider}:sub" = "system:serviceaccount:kube-system:aws-load-balancer-controller" 
+      }}
     }]
   })
 }

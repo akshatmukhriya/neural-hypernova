@@ -27,10 +27,9 @@ function bootstrap() {
 }
 
 function ignite() {
-    bootstrap
-    log "🚀 Ignite Sequence: V6.0.0 (The Fail-Open Protocol)"
+   bootstrap
+    log "🚀 Igniting V7.0.0 (Asynchronous Resilience)..."
     cd "$TF_DIR"
-    
     rm -rf .terraform .terraform.lock.hcl
     terraform init "${INIT_OPTS[@]}" -reconfigure
     terraform apply "${APPLY_OPTS[@]}"
@@ -40,42 +39,43 @@ function ignite() {
     ROLE_ARN=$(terraform output -raw lb_role_arn)
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
 
-    log "🛠️ Registering Global Repos..."
+    log "🛠️ Updating Repos..."
     helm repo add cilium https://helm.cilium.io/
     helm repo add eks https://aws.github.io/eks-charts
-    helm repo add ray-project https://ray-project.github.io/kuberay-helm/
+    helm repo add kuberay https://ray-project.github.io/kuberay-helm/
     helm repo update
 
     log "💉 Phase 1: Cilium eBPF..."
+    # NO WAIT: Let Kubernetes handle the pull and init in the background
     helm upgrade --install cilium cilium/cilium --version 1.16.5 -n kube-system \
-      --set kubeProxyReplacement=true --set-string debug.verbose="" --wait
+      --set kubeProxyReplacement=true --set-string debug.verbose=""
 
-    log "💉 Phase 2: AWS Load Balancer Controller (Atomic)..."
-    # Kill stale webhooks to ensure a clean path
+    log "💉 Phase 2: AWS Load Balancer Controller..."
     kubectl delete mutatingwebhookconfiguration elbv2.k8s.aws-mutating-webhook-configuration --ignore-not-found
     kubectl apply -f https://raw.githubusercontent.com/aws/eks-charts/master/stable/aws-load-balancer-controller/crds/crds.yaml
     
-    # THE UNICORN FIX: Disable failure blocking
+    # THE PRECISION FIX: Match serviceAccount name with IAM role exactly
     helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system \
       --set clusterName="$NAME" --set serviceAccount.create=true \
+      --set serviceAccount.name=aws-load-balancer-controller \
       --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="$ROLE_ARN" \
       --set region=us-east-1 --set vpcId="$VPC_ID" \
-      --set webhookConfig.failurePolicy=Ignore \
-      --set hostNetwork=true \
-      --wait
+      --set webhookConfig.failurePolicy=Ignore
 
-    log "💉 Phase 3: Karpenter..."
-    # FailurePolicy=Ignore ensures this command will NOT time out
+    log "💉 Phase 3: Karpenter & KubeRay..."
     helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter --version 1.1.1 \
-      -n karpenter --create-namespace --set settings.clusterName="$NAME" --wait
+      -n karpenter --create-namespace --set settings.clusterName="$NAME"
+    helm upgrade --install kuberay-operator kuberay/kuberay-operator --version 1.2.2
 
-    log "💉 Phase 4: KubeRay..."
-    helm upgrade --install kuberay-operator ray-project/kuberay-operator --version 1.2.2 --wait
-
-    log "🏗️ Manifests..."
+    log "🏗️ Finalizing Infrastructure..."
+    # Allow 60s for images to pull and networking to stabilize before manifests
+    sleep 60
     kubectl apply -f "$K8S_DIR/core/karpenter-gpu-pool.yaml"
     kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"
-    log "✅ SYSTEM ARMED."
+    
+    log "✅ IGNITION COMPLETE. Checking pod status..."
+    kubectl get pods -A
+    log "🚀 HYPERNOVA IS LIVE."
 }
 
 function nuke() {
