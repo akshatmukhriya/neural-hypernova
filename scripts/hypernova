@@ -5,7 +5,6 @@ set -e
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 TF_DIR="$ROOT_DIR/infra/terraform"
 K8S_DIR="$ROOT_DIR/k8s"
-
 COLOR_CYAN='\033[0;36m'
 COLOR_GREEN='\033[0;32m'
 COLOR_RESET='\033[0m'
@@ -25,10 +24,10 @@ function bootstrap() {
 
 function ignite() {
     bootstrap
-    log "🚀 Ignite Sequence: V33.0.0"
+    log "🚀 Ignite Sequence: V34.0.0"
     
-    # THE QUOTA FIX
-    log "🧹 Cleaning IP Debris..."
+    # Clean NAT IP Quota
+    log "🧹 Freeing IP Debris..."
     for eip in $(aws ec2 describe-addresses --query "Addresses[?AssociationId==null].AllocationId" --output text); do
       aws ec2 release-address --allocation-id $eip || true
     done
@@ -36,11 +35,6 @@ function ignite() {
     cd "$TF_DIR"
     rm -rf .terraform .terraform.lock.hcl
     terraform init "${INIT_OPTS[@]}" -reconfigure
-    
-    # Clear any deposed states causing cycles
-    log "🛠️ Purging State Phantoms..."
-    terraform refresh "${APPLY_OPTS[@]}" || true
-    
     terraform apply "${APPLY_OPTS[@]}"
     NAME=$(terraform output -raw cluster_name)
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
@@ -62,10 +56,10 @@ function ignite() {
     helm upgrade --install kuberay kuberay/kuberay-operator --version 1.2.2 --wait=false
 
     log "🏗️ Applying Forge Manifests..."
-    sleep 30
+    sleep 20
     kubectl apply -f "$K8S_DIR/core/karpenter-gpu-pool.yaml"
     kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"
-    log "✅ SYSTEM ARMED."
+    log "✅ FORGE INITIALIZED."
 }
 
 function demo() {
@@ -80,7 +74,7 @@ function demo() {
     SUBNETS=$(terraform output -json public_subnets | jq -r '.[]' | paste -sd " " -)
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
 
-    log "🌐 Ensuring Dashboard NodePort..."
+    log "🌐 Step 1: Deploying Dashboard NodePort..."
     cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: Service
@@ -92,12 +86,10 @@ spec:
   ports: [{ nodePort: 30265, port: 8265, targetPort: 8265 }]
 EOF
 
-    log "⏳ Phase 0: Waiting for Ray Pod..."
-    local ATTEMPTS=0
-    until kubectl get pod -l ray.io/node-type=head | grep "1/1" > /dev/null 2>&1 || [ $ATTEMPTS -eq 30 ]; do
-        log "Waiting for Pod... (Attempt $((ATTEMPTS+1))/30)"
-        sleep 10
-        ATTEMPTS=$((ATTEMPTS+1))
+    log "⏳ Phase 0: Waiting for Pod Readiness..."
+    until kubectl get pod -l ray.io/node-type=head | grep "1/1" > /dev/null 2>&1; do
+        log "Ray Pod is warming up..."
+        sleep 15
     done
 
     log "🌐 Phase 1: Building Hardware NLB..."
@@ -119,14 +111,11 @@ function nuke() {
     rm -rf .terraform .terraform.lock.hcl
     terraform init "${INIT_OPTS[@]}" -reconfigure || true
     VPC_ID=$(terraform output -raw vpc_id 2>/dev/null || echo "")
-    RAND_ID=$(terraform output -raw random_id 2>/dev/null || echo "final")
     NAME=$(terraform output -raw cluster_name 2>/dev/null || echo "hypernova")
 
-    log "1. Purging Hardware..."
     LB_ARNS=$(aws elbv2 describe-load-balancers --query "LoadBalancers[?contains(LoadBalancerName, 'hyp-lb')].LoadBalancerArn" --output text)
     for lb in $LB_ARNS; do aws elbv2 delete-load-balancer --load-balancer-arn "$lb" || true; done
 
-    log "2. Erasing Cluster..."
     aws eks delete-cluster --name "$NAME" --region us-east-1 2>/dev/null || true
     for eip in $(aws ec2 describe-addresses --region us-east-1 --query "Addresses[?VpcId=='$VPC_ID'].AllocationId" --output text); do
       aws ec2 release-address --allocation-id "$eip" --region us-east-1 || true
