@@ -67,9 +67,9 @@ function ignite() {
     sed -i "s/SUBNET_IDS_PLACEHOLDER/$SUBNET_IDS/" "$K8S_DIR/core/karpenter-gpu-pool.yaml"
     sed -i "s/SG_ID_PLACEHOLDER/$SG_ID/" "$K8S_DIR/core/karpenter-gpu-pool.yaml"
 
-    # Force delete to clear any 'NotReady' status from previous runs
-    kubectl delete -f "$K8S_DIR/core/karpenter-gpu-pool.yaml" --ignore-not-found
-    sleep 30
+    # # Force delete to clear any 'NotReady' status from previous runs
+    # kubectl delete -f "$K8S_DIR/core/karpenter-gpu-pool.yaml" --ignore-not-found
+    # sleep 30
     kubectl apply -f "$K8S_DIR/core/karpenter-gpu-pool.yaml"
     kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"
     log "✅ SYSTEM ARMED."
