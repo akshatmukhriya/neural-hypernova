@@ -1,4 +1,4 @@
-# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V26.0.0 ---
+# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V27.0.0 ---
 
 terraform {
   required_version = ">= 1.5.0"
@@ -51,7 +51,7 @@ resource "aws_security_group" "forge_sg" {
   name_prefix = "hypernova-forge-sg-"
   vpc_id      = module.vpc.vpc_id
 
-  # Rule: Internal Handshake (All ports within VPC)
+  # Internal handshake
   ingress {
     from_port   = 0
     to_port     = 0
@@ -59,7 +59,7 @@ resource "aws_security_group" "forge_sg" {
     cidr_blocks = ["10.0.0.0/16"]
   }
 
-  # Rule: Ray Dashboard NodePort (For CLI-NLB Bypass)
+  # Ray Dashboard NodePort (For NLB Bypass)
   ingress {
     from_port   = 30265
     to_port     = 30265
@@ -72,10 +72,6 @@ resource "aws_security_group" "forge_sg" {
     to_port     = 0
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  lifecycle {
-    create_before_destroy = true
   }
 }
 
@@ -93,17 +89,33 @@ module "eks" {
   create_cloudwatch_log_group = false
   cluster_encryption_config   = {} 
 
-  authentication_mode            = "API_AND_CONFIG_MAP"
-  cluster_endpoint_public_access = true
-  
-  # IDENTITY: Trust only the creator (Runner)
-  enable_cluster_creator_admin_permissions = true
+  # THE IDENTITY FIX: Force API_AND_CONFIG_MAP and disable auto-permissions
+  authentication_mode                      = "API_AND_CONFIG_MAP"
+  enable_cluster_creator_admin_permissions = false
+
+  # Manual Identity Mapping
+  access_entries = {
+    # 1. Grant the Runner (GitHub) Admin
+    runner = {
+      principal_arn = var.runner_arn
+      policy_associations = {
+        admin = {
+          policy_arn = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+          access_scope = { type = "cluster" }
+        }
+      }
+    }
+    # 2. Grant the Nodes permission to JOIN the cluster
+    nodes = {
+      principal_arn = module.eks.eks_managed_node_groups["brain"].iam_role_arn
+      type          = "EC2_LINUX"
+    }
+  }
 
   eks_managed_node_groups = {
     brain = {
       instance_types = ["t3.large"]
       ami_type       = "AL2023_x86_64_STANDARD"
-      # Attach our custom SG directly to ensure connectivity
       vpc_security_group_ids = [aws_security_group.forge_sg.id]
     }
   }
