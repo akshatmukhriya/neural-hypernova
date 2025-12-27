@@ -1,10 +1,10 @@
-# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V11.0.0 ---
+# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V12.0.0 ---
 
 terraform {
   required_version = ">= 1.5.0"
   required_providers {
-    aws  = { source = "hashicorp/aws", version = "~> 5.0" }
-    http = { source = "hashicorp/http", version = "~> 3.0" }
+    aws    = { source = "hashicorp/aws", version = "~> 5.0" }
+    http   = { source = "hashicorp/http", version = "~> 3.0" }
     random = { source = "hashicorp/random", version = "~> 3.0" }
   }
   backend "s3" {
@@ -16,7 +16,7 @@ terraform {
 provider "aws" { region = "us-east-1" }
 
 resource "random_string" "id" {
-  length  = 6
+  length  = 4
   special = false
   upper   = false
 }
@@ -47,7 +47,34 @@ module "vpc" {
   }
 }
 
-# --- 2. THE BRAIN (EKS) ---
+# --- 2. DEDICATED SECURITY GROUP ---
+resource "aws_security_group" "nodes" {
+  name        = "hypernova-node-sg-${random_string.id.result}"
+  vpc_id      = module.vpc.vpc_id
+
+  ingress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["10.0.0.0/16"]
+  }
+
+  ingress {
+    from_port   = 8265
+    to_port     = 8265
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+# --- 3. THE BRAIN (EKS) ---
 module "eks" {
   source  = "terraform-aws-modules/eks/aws"
   version = "20.24.0"
@@ -65,35 +92,8 @@ module "eks" {
   cluster_endpoint_public_access = true
   enable_cluster_creator_admin_permissions = true
 
-  node_security_group_enable_recommended_rules = true
-  node_security_group_additional_rules = {
-    ingress_all_vpc = {
-      description = "VPC Internal Handshake"
-      protocol    = "-1"
-      from_port   = 0
-      to_port     = 0
-      type        = "ingress"
-      cidr_blocks = ["10.0.0.0/16"]
-    }
-    # THE UNICORN FIX: Open Webhook Port to the World
-    # This ensures the EKS Control Plane (managed by AWS) can reach the HostNetwork pod
-    ingress_webhook_public = {
-      description = "Allow LBC Webhook Access"
-      protocol    = "tcp"
-      from_port   = 9443
-      to_port     = 9443
-      type        = "ingress"
-      cidr_blocks = ["0.0.0.0/0"]
-    }
-    ingress_ray = {
-      description = "Ray Dashboard Public"
-      protocol    = "tcp"
-      from_port   = 8265
-      to_port     = 8265
-      type        = "ingress"
-      cidr_blocks = ["0.0.0.0/0"]
-    }
-  }
+  create_node_security_group = false
+  node_security_group_id     = aws_security_group.nodes.id
 
   eks_managed_node_groups = {
     brain = {
@@ -106,10 +106,10 @@ module "eks" {
   }
 }
 
-# --- 3. IAM ---
+# --- 4. IAM ---
 resource "aws_iam_policy" "lbc" {
-  name        = "AWSLBCPolicy-${random_string.id.result}"
-  policy      = data.http.lb_policy.response_body
+  name   = "AWSLBCPolicy-${random_string.id.result}"
+  policy = data.http.lb_policy.response_body
 }
 
 resource "aws_iam_role" "lbc" {

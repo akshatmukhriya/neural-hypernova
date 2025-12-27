@@ -6,10 +6,14 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 TF_DIR="$ROOT_DIR/infra/terraform"
 K8S_DIR="$ROOT_DIR/k8s"
 
-function log() { echo -e "\033[0;36m[HYPERNOVA] $1\033[0m"; }
+COLOR_CYAN='\033[0;36m'
+COLOR_GREEN='\033[0;32m'
+COLOR_RESET='\033[0m'
+
+function log() { echo -e "${COLOR_CYAN}[HYPERNOVA] $1${COLOR_RESET}"; }
 
 function bootstrap() {
-    log "📡 Detecting Identity..."
+    log "📡 Detecting Cloud Identity..."
     RUNNER_ARN=$(aws sts get-caller-identity --query Arn --output text)
     ACCOUNT_ID=$(echo $RUNNER_ARN | cut -d: -f5)
     [[ $RUNNER_ARN == *"assumed-role"* ]] && CLEAN_ARN="arn:aws:iam::$ACCOUNT_ID:role/$(echo $RUNNER_ARN | cut -d/ -f2)" || CLEAN_ARN=$RUNNER_ARN
@@ -21,7 +25,7 @@ function bootstrap() {
 
 function ignite() {
     bootstrap
-    log "🚀 Ignite Sequence: V11.0.0 (The HostNetwork Bypass)"
+    log "🚀 Ignite Sequence: V12.0.0 (Atomic Standard)"
     cd "$TF_DIR"
     rm -rf .terraform .terraform.lock.hcl
     terraform init "${INIT_OPTS[@]}" -reconfigure
@@ -32,42 +36,32 @@ function ignite() {
     ROLE_ARN=$(terraform output -raw lb_role_arn)
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
 
-    log "🧹 Webhook Phantom Purge..."
-    kubectl delete mutatingwebhookconfiguration --all || true
-
     log "🛠️ Updating Repos..."
     helm repo add cilium https://helm.cilium.io/
     helm repo add eks https://aws.github.io/eks-charts
+    helm repo add ray https://ray-project.github.io/kuberay-helm/
     helm repo update
 
     log "💉 Phase 1: Cilium eBPF..."
     helm upgrade --install cilium cilium/cilium --version 1.16.5 -n kube-system \
       --set kubeProxyReplacement=true --set-string debug.verbose="" --wait=false
 
-    log "💉 Phase 2: AWS Load Balancer Controller (HostNetwork Mode)..."
+    log "💉 Phase 2: Karpenter & Ray Operator..."
+    helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter --version 1.1.1 \
+      -n karpenter --create-namespace --set settings.clusterName="$NAME" --wait=false
+    helm upgrade --install kuberay kuberay/kuberay-operator --version 1.2.2 --wait=false
+
+    log "💉 Phase 3: AWS Load Balancer Controller..."
     kubectl apply -f https://raw.githubusercontent.com/aws/eks-charts/master/stable/aws-load-balancer-controller/crds/crds.yaml
-    
-    # THE UNICORN FIX: hostNetwork=true + failurePolicy=Ignore
-    # This forces the pod to use the Node's IP, making it reachable by EKS Control Plane
     helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system \
       --set clusterName="$NAME" --set serviceAccount.create=true \
       --set serviceAccount.name=aws-load-balancer-controller \
       --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="$ROLE_ARN" \
       --set region=us-east-1 --set vpcId="$VPC_ID" \
-      --set webhookConfig.failurePolicy=Ignore \
-      --set hostNetwork=true \
-      --wait=false
-
-    log "💉 Phase 3: Karpenter & AI Forge..."
-    helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter --version 1.1.1 \
-      -n karpenter --create-namespace --set settings.clusterName="$NAME" --wait=false
-    
-    helm repo add ray https://ray-project.github.io/kuberay-helm/
-    helm repo update
-    helm upgrade --install kuberay-operator ray/kuberay-operator --version 1.2.2 --wait=false
+      --set webhookConfig.failurePolicy=Ignore --wait=false
 
     log "🏗️ Applying Forge Manifests..."
-    sleep 30
+    sleep 20
     kubectl apply -f "$K8S_DIR/core/karpenter-gpu-pool.yaml"
     kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"
     log "✅ SYSTEM ARMED."
@@ -75,17 +69,18 @@ function ignite() {
 
 function demo() {
     bootstrap
-    log "🎭 Spectator Protocol..."
+    log "🎭 Launching Spectator Protocol (Quarantine Mode)..."
     cd "$TF_DIR"
     terraform init "${INIT_OPTS[@]}" -reconfigure > /dev/null
     NAME=$(terraform output -raw cluster_name)
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
-    
-    # SPEED RUN: Kill the webhook and instantly apply the service before it recreates
-    log "⚔️  Neutralizing Webhooks..."
+
+    # --- THE QUARANTINE PROTOCOL ---
+    log "⚔️  Quarantining Load Balancer Controller..."
+    kubectl scale deployment aws-load-balancer-controller -n kube-system --replicas=0
     kubectl delete mutatingwebhookconfiguration elbv2.k8s.aws-mutating-webhook-configuration --ignore-not-found
     
-    log "🌐 Exposing Dashboard..."
+    log "🌐 Exposing Dashboard (Unprotected Apply)..."
     cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: Service
@@ -99,12 +94,21 @@ spec:
   selector: { ray.io/node-type: head }
   ports: [{ name: dash, port: 8265, targetPort: 8265 }]
 EOF
-    log "Waiting for DNS..."
-    URL=""
+
+    log "⚔️  Restoring Load Balancer Controller..."
+    kubectl scale deployment aws-load-balancer-controller -n kube-system --replicas=1
+
+    log "⏳ Phase 1: DNS Identification..."
+    local URL=""
     while [ -z "$URL" ]; do
         URL=$(kubectl get svc hypernova-dashboard-lb -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+        [ ! -z "$URL" ] && break
         sleep 10
     done
+    log "DNS Assigned: $URL"
+
+    log "⏳ Phase 2: DNS Propagation..."
+    until nslookup "$URL" > /dev/null 2>&1; do sleep 15; done
     log "🚀 DASHBOARD: http://$URL:8265"
 }
 
