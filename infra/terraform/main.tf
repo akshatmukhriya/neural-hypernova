@@ -1,4 +1,4 @@
-# --- NEURAL HYPERNOVA: SOVEREIGN INFRASTRUCTURE V20.0.0 ---
+# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V21.0.0 ---
 
 terraform {
   required_version = ">= 1.5.0"
@@ -16,15 +16,12 @@ terraform {
 provider "aws" { region = "us-east-1" }
 
 resource "random_string" "id" {
-  length  = 6
+  length  = 4
   special = false
   upper   = false
 }
 
 data "aws_caller_identity" "current" {}
-data "http" "lb_policy" {
-  url = "https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/main/docs/install/iam_policy.json"
-}
 
 # --- 1. NETWORK ---
 module "vpc" {
@@ -40,14 +37,41 @@ module "vpc" {
   enable_nat_gateway = true
   single_nat_gateway = true 
 
+  # We keep these for completeness, though our script will bypass LBC
   public_subnet_tags = { "kubernetes.io/role/elb" = 1 }
-  private_subnet_tags = { 
-    "kubernetes.io/role/internal-elb" = 1
-    "karpenter.sh/discovery"          = "hypernova-${random_string.id.result}" 
+  private_subnet_tags = { "karpenter.sh/discovery" = "hypernova-${random_string.id.result}" }
+}
+
+# --- 2. DEDICATED SECURITY GROUP ---
+resource "aws_security_group" "forge_sg" {
+  name_prefix = "hypernova-forge-"
+  vpc_id      = module.vpc.vpc_id
+
+  # Allow all VPC internal traffic
+  ingress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["10.0.0.0/16"]
+  }
+
+  # THE FIX: Allow Ray Dashboard NodePort from the internet (for the NLB)
+  ingress {
+    from_port   = 30265
+    to_port     = 30265
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
   }
 }
 
-# --- 2. THE BRAIN (EKS) ---
+# --- 3. THE BRAIN (EKS) ---
 module "eks" {
   source  = "terraform-aws-modules/eks/aws"
   version = "20.24.0"
@@ -65,61 +89,17 @@ module "eks" {
   cluster_endpoint_public_access = true
   enable_cluster_creator_admin_permissions = true
 
-  node_security_group_enable_recommended_rules = true
-  node_security_group_additional_rules = {
-    ingress_vpc_all = {
-      description = "VPC Internal Handshake"
-      protocol    = "-1"
-      from_port   = 0
-      to_port     = 0
-      type        = "ingress"
-      cidr_blocks = ["10.0.0.0/16"]
-    }
-    ingress_ray = {
-      description = "Ray Dashboard Public"
-      protocol    = "tcp"
-      from_port   = 8265
-      to_port     = 8265
-      type        = "ingress"
-      cidr_blocks = ["0.0.0.0/0"]
-    }
-  }
-
   eks_managed_node_groups = {
     brain = {
       instance_types = ["t3.large"]
       ami_type       = "AL2023_x86_64_STANDARD"
-      min_size       = 1
-      max_size       = 1
-      desired_size   = 1
+      vpc_security_group_ids = [aws_security_group.forge_sg.id]
     }
   }
 }
 
-# --- 3. IAM ---
-resource "aws_iam_policy" "lbc" {
-  name        = "AWSLBCPolicy-${random_string.id.result}"
-  policy      = data.http.lb_policy.response_body
-}
-
-resource "aws_iam_role" "lbc" {
-  name = "lbc-role-${random_string.id.result}"
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Action = "sts:AssumeRoleWithWebIdentity"
-      Effect = "Allow"
-      Principal = { Federated = module.eks.oidc_provider_arn }
-      Condition = { StringEquals = { "${module.eks.oidc_provider}:sub" = "system:serviceaccount:kube-system:aws-load-balancer-controller" }}
-    }]
-  })
-}
-
-resource "aws_iam_role_policy_attachment" "lbc" {
-  policy_arn = aws_iam_policy.lbc.arn
-  role       = aws_iam_role.lbc.name
-}
-
-output "cluster_name" { value = module.eks.cluster_name }
-output "vpc_id"       { value = module.vpc.vpc_id }
-output "lb_role_arn"  { value = aws_iam_role.lbc.arn }
+# --- 4. OUTPUTS ---
+output "cluster_name"    { value = module.eks.cluster_name }
+output "vpc_id"          { value = module.vpc.vpc_id }
+output "public_subnets"  { value = module.vpc.public_subnets }
+output "random_id"       { value = random_string.id.result }
