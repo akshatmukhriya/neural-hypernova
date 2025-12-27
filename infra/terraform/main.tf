@@ -1,4 +1,4 @@
-# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V22.0.0 ---
+# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V22.1.0 ---
 
 terraform {
   required_version = ">= 1.5.0"
@@ -13,8 +13,17 @@ terraform {
   }
 }
 
-provider "aws" { region = "us-east-1" }
+provider "aws" {
+  region = "us-east-1"
+}
 
+# --- 1. GLOBAL VARIABLES (THE FIX) ---
+variable "runner_arn" {
+  type    = string
+  default = ""
+}
+
+# THE GHOST-BREAKER
 resource "random_string" "id" {
   length  = 4
   special = false
@@ -23,7 +32,7 @@ resource "random_string" "id" {
 
 data "aws_caller_identity" "current" {}
 
-# --- 1. NETWORK ---
+# --- 2. NETWORK ---
 module "vpc" {
   source  = "terraform-aws-modules/vpc/aws"
   version = "5.2.0"
@@ -40,9 +49,9 @@ module "vpc" {
   public_subnet_tags = { "kubernetes.io/role/elb" = 1 }
 }
 
-# --- 2. SECURITY GROUP (NLB BYPASS GATE) ---
+# --- 3. SECURITY GROUP (NLB BYPASS GATE) ---
 resource "aws_security_group" "forge_sg" {
-  name        = "hypernova-forge-sg-${random_string.id.result}"
+  name_prefix = "hypernova-forge-sg-${random_string.id.result}"
   vpc_id      = module.vpc.vpc_id
 
   ingress {
@@ -65,9 +74,13 @@ resource "aws_security_group" "forge_sg" {
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
-# --- 3. EKS CLUSTER ---
+# --- 4. EKS CLUSTER ---
 module "eks" {
   source  = "terraform-aws-modules/eks/aws"
   version = "20.24.0"
@@ -92,9 +105,21 @@ module "eks" {
       vpc_security_group_ids = [aws_security_group.forge_sg.id]
     }
   }
+
+  access_entries = {
+    runner = {
+      principal_arn = var.runner_arn
+      policy_associations = {
+        admin = {
+          policy_arn = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+          access_scope = { type = "cluster" }
+        }
+      }
+    }
+  }
 }
 
-# --- 4. OUTPUTS (The Data Plane) ---
+# --- 5. OUTPUTS ---
 output "cluster_name"    { value = module.eks.cluster_name }
 output "vpc_id"          { value = module.vpc.vpc_id }
 output "public_subnets"  { value = module.vpc.public_subnets }
