@@ -12,51 +12,49 @@ COLOR_GREEN='\033[0;32m'
 COLOR_RESET='\033[0m'
 
 function log() { echo -e "${COLOR_CYAN}[HYPERNOVA] $1${COLOR_RESET}"; }
-function error_log() { echo -e "${COLOR_RED}[ERROR] $1${COLOR_RESET}"; }
 
 function bootstrap() {
     log "📡 Detecting Identity..."
     RUNNER_ARN=$(aws sts get-caller-identity --query Arn --output text)
     ACCOUNT_ID=$(echo $RUNNER_ARN | cut -d: -f5)
-    [[ $RUNNER_ARN == *"assumed-role"* ]] && CLEAN_ARN="arn:aws:iam::$ACCOUNT_ID:role/$(echo $RUNNER_ARN | cut -d/ -f2)" || CLEAN_ARN=$RUNNER_ARN
-    
     BUCKET="hypernova-state-$ACCOUNT_ID"
     aws s3 mb "s3://$BUCKET" --region us-east-1 2>/dev/null || true
     INIT_OPTS=(-backend-config="bucket=$BUCKET")
-    APPLY_OPTS=(-var="runner_arn=$CLEAN_ARN" -auto-approve)
-
-    log "🧹 Recovering IP Quota (Wiping leaked EIPs)..."
+    
+    log "🧹 Recovering IP Quota..."
     for eip in $(aws ec2 describe-addresses --query "Addresses[?AssociationId==null].AllocationId" --output text); do
-      aws ec2 release-address --allocation-id $eip || true
+      aws ec2 release-address --allocation-id "$eip" --region us-east-1 || true
     done
 }
 
 function ignite() {
     bootstrap
-    log "🚀 Ignite Sequence: V14.0.0 (The Ghost-Breaker)"
+    log "🚀 Ignite Sequence: V15.0.0 (Native Auth Protocol)"
     cd "$TF_DIR"
+    
+    # Force clean context to ensure random_string generates fresh
     rm -rf .terraform .terraform.lock.hcl
     terraform init "${INIT_OPTS[@]}" -reconfigure
-    terraform apply "${APPLY_OPTS[@]}"
+    
+    log "🏗️ Synthesizing Sovereign Infrastructure..."
+    terraform apply -auto-approve
 
     NAME=$(terraform output -raw cluster_name)
     VPC_ID=$(terraform output -raw vpc_id)
     ROLE_ARN=$(terraform output -raw lb_role_arn)
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
 
-    log "🛠️ Injecting Operational Stack..."
-    helm repo add cilium https://helm.cilium.io/
-    helm repo add eks https://aws.github.io/eks-charts
-    helm repo add kuberay https://ray-project.github.io/kuberay-helm/
-    helm repo update
-
     log "💉 Phase 1: Cilium eBPF..."
+    helm repo add cilium https://helm.cilium.io/
+    helm repo update
     helm upgrade --install cilium cilium/cilium --version 1.16.5 -n kube-system \
       --set kubeProxyReplacement=true --set-string debug.verbose="" --wait=false
 
     log "💉 Phase 2: AWS Load Balancer Controller..."
     kubectl delete mutatingwebhookconfiguration elbv2.k8s.aws-mutating-webhook-configuration --ignore-not-found
     kubectl apply -f https://raw.githubusercontent.com/aws/eks-charts/master/stable/aws-load-balancer-controller/crds/crds.yaml
+    helm repo add eks https://aws.github.io/eks-charts
+    helm repo update
     helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system \
       --set clusterName="$NAME" --set serviceAccount.create=true \
       --set serviceAccount.name=aws-load-balancer-controller \
@@ -64,25 +62,29 @@ function ignite() {
       --set region=us-east-1 --set vpcId="$VPC_ID" \
       --set webhookConfig.failurePolicy=Ignore --wait=false
 
-    log "💉 Phase 3: Karpenter & Ray..."
+    log "💉 Phase 3: Karpenter & AI Forge..."
     helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter --version 1.1.1 \
       -n karpenter --create-namespace --set settings.clusterName="$NAME" --wait=false
-    helm upgrade --install kuberay-operator kuberay/kuberay-operator --version 1.2.2 --wait=false
+    helm repo add ray https://ray-project.github.io/kuberay-helm/
+    helm repo update
+    helm upgrade --install kuberay-operator ray/kuberay-operator --version 1.2.2 --wait=false
 
-    log "🏗️ Applying Forge Manifests..."
+    log "🏗️ Applying Neural Manifests..."
     sleep 30
     kubectl apply -f "$K8S_DIR/core/karpenter-gpu-pool.yaml"
     kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"
-    log "✅ SYSTEM ARMED."
+    
+    log "✅ SYSTEM ARMED. Hypernova is converging."
 }
 
 function demo() {
     bootstrap
     log "🎭 Spectator Protocol..."
-    NAME=$(cd "$TF_DIR" && terraform output -raw cluster_name)
+    cd "$TF_DIR"
+    NAME=$(terraform output -raw cluster_name)
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
     
-    log "🌐 Exposing Dashboard..."
+    log "🌐 Exposing Dashboard NLB..."
     cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: Service
@@ -91,6 +93,7 @@ metadata:
   annotations:
     service.beta.kubernetes.io/aws-load-balancer-type: external
     service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: instance
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
 spec:
   type: LoadBalancer
   selector: { ray.io/node-type: head }
@@ -118,14 +121,12 @@ function nuke() {
     kubectl delete svc hypernova-dashboard-lb --ignore-not-found || true
     aws eks delete-cluster --name "$NAME" --region us-east-1 2>/dev/null || true
     
-    log "2. Destruction..."
-    terraform destroy "${APPLY_OPTS[@]}" || true
-    
-    if [ ! -z "$VPC_ID" ] && [ "$VPC_ID" != "null" ]; then
-        log "3. Deep Sweep..."
-        ENIS=$(aws ec2 describe-network-interfaces --filters "Name=vpc-id,Values=$VPC_ID" --query "NetworkInterfaces[*].NetworkInterfaceId" --output text)
-        for eni in $ENIS; do aws ec2 delete-network-interface --network-interface-id "$eni" || true; done
-    fi
+    log "2. Resource Release..."
+    EIPS=$(aws ec2 describe-addresses --region us-east-1 --query "Addresses[?VpcId=='$VPC_ID'].AllocationId" --output text)
+    for eip in $EIPS; do aws ec2 release-address --allocation-id "$eip" --region us-east-1 || true; done
+
+    log "3. Terraform Destroy..."
+    terraform destroy -auto-approve || true
     log "🌑 CLEAN."
 }
 

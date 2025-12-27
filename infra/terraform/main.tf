@@ -1,4 +1,4 @@
-# --- NEURAL HYPERNOVA: SOVEREIGN ARCHITECTURE V14.0.0 ---
+# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V15.0.0 ---
 
 terraform {
   required_version = ">= 1.5.0"
@@ -15,16 +15,11 @@ terraform {
 
 provider "aws" { region = "us-east-1" }
 
-# THE GHOST-BREAKER: Generates a unique ID for this specific run
+# THE GHOST-BREAKER: 6 characters to ensure zero naming collision
 resource "random_string" "id" {
-  length  = 4
+  length  = 6
   special = false
   upper   = false
-}
-
-variable "runner_arn" {
-  type    = string
-  default = ""
 }
 
 data "aws_caller_identity" "current" {}
@@ -32,7 +27,7 @@ data "http" "lb_policy" {
   url = "https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/main/docs/install/iam_policy.json"
 }
 
-# --- 1. NETWORK (Randomized) ---
+# --- 1. NETWORK (Isolation) ---
 module "vpc" {
   source  = "terraform-aws-modules/vpc/aws"
   version = "5.2.0"
@@ -44,7 +39,7 @@ module "vpc" {
   public_subnets  = ["10.0.101.0/24", "10.0.102.0/24", "10.0.103.0/24"]
 
   enable_nat_gateway = true
-  single_nat_gateway = true # Save EIP quota
+  single_nat_gateway = true 
 
   public_subnet_tags = { "kubernetes.io/role/elb" = 1 }
   private_subnet_tags = { 
@@ -63,19 +58,22 @@ module "eks" {
   vpc_id          = module.vpc.vpc_id
   subnet_ids      = module.vpc.private_subnets
 
-  # GHOST-PROOFING: Disable all custom KMS and CloudWatch to avoid Alias collisions
+  # GHOST-PROOFING: Neutralize global collisions
   create_kms_key              = false
   create_cloudwatch_log_group = false
   cluster_encryption_config   = {} 
 
   authentication_mode            = "API_AND_CONFIG_MAP"
   cluster_endpoint_public_access = true
+
+  # THE COLLISION FIX: EKS creates the Access Entry for us. 
+  # We do NOT add a manual 'runner' block in access_entries.
   enable_cluster_creator_admin_permissions = true
 
-  # Wide-open VPC rule for internal handshake reliability
+  node_security_group_enable_recommended_rules = true
   node_security_group_additional_rules = {
     ingress_vpc_all = {
-      description = "VPC Internal"
+      description = "VPC Internal Handshake"
       protocol    = "-1"
       from_port   = 0
       to_port     = 0
@@ -86,35 +84,23 @@ module "eks" {
 
   eks_managed_node_groups = {
     brain = {
-      instance_types = ["t3.large"] # 8GB RAM to prevent join-crashes
+      instance_types = ["t3.large"]
       ami_type       = "AL2023_x86_64_STANDARD"
       min_size       = 1
       max_size       = 1
       desired_size   = 1
     }
   }
-
-  access_entries = {
-    runner = {
-      principal_arn = var.runner_arn
-      policy_associations = {
-        admin = {
-          policy_arn = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
-          access_scope = { type = "cluster" }
-        }
-      }
-    }
-  }
 }
 
-# --- 3. IAM (Randomized Suffixes) ---
+# --- 3. IAM (Identity) ---
 resource "aws_iam_policy" "lbc" {
   name        = "AWSLBCPolicy-${random_string.id.result}"
   policy      = data.http.lb_policy.response_body
 }
 
 resource "aws_iam_role" "lbc" {
-  name = "lbc-role-hypernova-${random_string.id.result}"
+  name = "lbc-role-${random_string.id.result}"
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
@@ -131,8 +117,8 @@ resource "aws_iam_role_policy_attachment" "lbc" {
   role       = aws_iam_role.lbc.name
 }
 
-# --- 4. OUTPUTS ---
+# --- 4. OUTPUTS (The Interface) ---
 output "cluster_name" { value = module.eks.cluster_name }
-output "region"       { value = "us-east-1" }
 output "vpc_id"       { value = module.vpc.vpc_id }
 output "lb_role_arn"  { value = aws_iam_role.lbc.arn }
+output "region"       { value = "us-east-1" }
