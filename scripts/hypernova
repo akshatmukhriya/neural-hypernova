@@ -42,6 +42,10 @@ function ignite() {
       --set kubeProxyReplacement=true --set-string debug.verbose="" --wait=false
 
     log "💉 Phase 2: Karpenter (IRSA Handshake)..."
+    CONTROLLER_ROLE=$(terraform output -raw karpenter_role)
+    NAME=$(terraform output -raw cluster_name)
+    
+    log "💉 Phase 2: Karpenter (IRSA Handshake)..."
     helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter --version 1.1.1 \
       -n karpenter --create-namespace \
       --set "serviceAccount.annotations.eks\.amazonaws\.com/role-arn=$CONTROLLER_ROLE" \

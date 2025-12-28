@@ -1,4 +1,4 @@
-# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V42.1.0 ---
+# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V42.2.0 ---
 
 terraform {
   required_version = ">= 1.5.0"
@@ -106,13 +106,12 @@ module "eks" {
     }
   }
 
-  # MANDATORY FOR 1.31: Explicitly trust the Node Role and the Controller
+  # MANDATORY FOR 1.31: Trust the Nodes and the Controller
   access_entries = {
     nodes = {
       principal_arn = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/KarpenterNodeRole-hypernova"
       type          = "EC2_LINUX"
     }
-    # Grant Karpenter Controller Admin rights so it can see unschedulable pods
     karpenter = {
       principal_arn = module.karpenter_controller_role.iam_role_arn
       policy_associations = {
@@ -147,7 +146,6 @@ module "karpenter_controller_role" {
   }
 }
 
-# FIXED: Removed all semicolons and shorthand
 resource "aws_iam_role_policy" "karpenter_discovery" {
   name = "karpenter-discovery-api"
   role = module.karpenter_controller_role.iam_role_name
@@ -170,9 +168,8 @@ resource "aws_iam_role_policy" "karpenter_discovery" {
   })
 }
 
-# --- 5. OUTPUTS ---
-output "cluster_name"               { value = module.eks.cluster_name }
-output "vpc_id"                     { value = module.vpc.vpc_id }
-output "public_subnets"             { value = module.vpc.public_subnets }
-output "random_id"                  { value = random_string.id.result }
-output "karpenter_controller_role"  { value = module.karpenter_controller_role.iam_role_arn }
+# --- 5. OUTPUTS (SYNCHRONIZED) ---
+output "cluster_name"   { value = module.eks.cluster_name }
+output "vpc_id"         { value = module.vpc.vpc_id }
+output "random_id"      { value = random_string.id.result }
+output "karpenter_role" { value = module.karpenter_controller_role.iam_role_arn }
