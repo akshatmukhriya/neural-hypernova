@@ -2,8 +2,6 @@ apiVersion: ray.io/v1
 kind: RayCluster
 metadata:
   name: hypernova-ray
-  labels:
-    hypernova: "true"
 spec:
   rayVersion: '2.9.0'
   headGroupSpec:
@@ -12,54 +10,41 @@ spec:
       include-dashboard: "true"
       block: "true"
     template:
-      metadata:
-        labels:
-          ray.io/node-type: head
-          ray.io/cluster: hypernova-ray
       spec:
         containers:
           - name: ray-head
-            # THE SPEED FIX: Base image is ~500MB (ML image is ~10GB)
-            # This ensures the dashboard comes up instantly on t3.large
             image: rayproject/ray:2.9.0-py310 
             ports:
               - containerPort: 8265
-                name: dashboard
               - containerPort: 6379
-                name: gcs
               - containerPort: 10001
-                name: client
             resources:
+              # SURGICAL COMPRESSION:
+              # Requests 0.2 CPU, allows burst to 1 CPU.
+              requests:
+                cpu: "200m"
+                memory: "512Mi"
               limits:
                 cpu: "1"
                 memory: "2Gi"
-              requests:
-                cpu: "500m"
-                memory: "1Gi"
   workerGroupSpecs:
-    - replicas: 1 # Karpenter will trigger when this pod is created
+    - replicas: 0 # Keep at 0 to prove JIT scaling works
       minReplicas: 0
       maxReplicas: 10
       groupName: gpu-group
       rayStartParams: {}
       template:
-        metadata:
-          labels:
-            ray.io/node-type: worker
-            ray.io/cluster: hypernova-ray
         spec:
-          # This triggers the NVIDIA drivers and Karpenter GPU provisioning
           runtimeClassName: nvidia 
           containers:
             - name: ray-worker
-              # Workers still get the full ML suite for heavy lifting
               image: rayproject/ray-ml:2.9.0-py310-gpu
               resources:
                 limits:
                   nvidia.com/gpu: 1
-                  cpu: "4"
-                  memory: "16Gi"
-                requests:
-                  nvidia.com/gpu: 1
                   cpu: "2"
                   memory: "8Gi"
+                requests:
+                  nvidia.com/gpu: 1
+                  cpu: "1"
+                  memory: "4Gi"
