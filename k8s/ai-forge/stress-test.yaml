@@ -1,48 +1,36 @@
 apiVersion: ray.io/v1
 kind: RayJob
 metadata:
-  name: hypernova-surge-demo
-  labels:
-    hypernova: "true"
+  name: hypernova-gpu-surge
 spec:
-  # The Sovereign Task: Demand 2 GPUs for a distributed Python surge
+  # The Python surge: Demand 2 GPUs for the task
   entrypoint: |
     python -c "import ray; ray.init(); @ray.remote(num_gpus=1) def work(): import time; time.sleep(120); return 1; ray.get([work.remote() for _ in range(2)])"
   rayClusterSpec:
     rayVersion: '2.9.0'
     headGroupSpec:
-      # THE CRITICAL FIX: Explicitly defining start parameters for the Head
       rayStartParams:
         dashboard-host: "0.0.0.0"
-        block: "true"
       template:
         spec:
           containers:
             - name: ray-head
-              image: rayproject/ray:2.9.0-py310 # Slim image for fast-boot
-              ports:
-                - containerPort: 8265
-                - containerPort: 6379
-                - containerPort: 10001
+              image: rayproject/ray:2.9.0-py310 
               resources:
-                limits:
-                  cpu: "1"
-                  memory: "2Gi"
-                requests:
-                  cpu: "500m"
-                  memory: "1Gi"
+                requests: { cpu: "200m", memory: "512Mi" }
+                limits: { cpu: "1", memory: "2Gi" }
     workerGroupSpecs:
-      - replicas: 0 # Start at 0 to force Karpenter JIT scaling
+      - replicas: 1 # FORCE A START: This triggers Karpenter immediately
         minReplicas: 0
         maxReplicas: 5
         groupName: gpu-group
-        rayStartParams: {} # Required mapping
+        rayStartParams: {}
         template:
           spec:
-            runtimeClassName: nvidia # Triggers Karpenter and NVIDIA drivers
+            runtimeClassName: nvidia 
             containers:
               - name: ray-worker
-                image: rayproject/ray-ml:2.9.0-py310-gpu # Heavy ML image for workers
+                image: rayproject/ray-ml:2.9.0-py310-gpu
                 resources:
                   limits:
                     nvidia.com/gpu: 1
