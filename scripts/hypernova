@@ -82,11 +82,16 @@ function demo() {
     bootstrap
     log "🎭 Launching Spectator Protocol..."
     cd "$TF_DIR"
+    # Quietly refresh state
     terraform init "${INIT_OPTS[@]}" -reconfigure > /dev/null
+    
+    # Fetch Outputs
     NAME=$(terraform output -raw cluster_name)
     VPC_ID=$(terraform output -raw vpc_id)
     RAND_ID=$(terraform output -raw random_id)
     SUBNETS=$(terraform output -json public_subnets | jq -r '.[]' | paste -sd " " -)
+    
+    # Sync Context
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
 
     log "🌐 Exposing Dashboard via NodePort..."
@@ -101,27 +106,49 @@ spec:
   ports: [{ nodePort: 30265, port: 8265, targetPort: 8265 }]
 EOF
 
-    log "⏳ Phase 0: Waiting for Ray Head..."
-    # Wait for Head status Running
-    until kubectl get pod -l ray.io/node-type:head -o jsonpath='{.items[0].status.phase}' 2>/dev/null | grep -q "Running"; do 
+    log "⏳ Phase 0: Waiting for Ray Head to Initialize..."
+    
+    # 1. Wait for Pod Creation (loop until at least one head pod exists)
+    until kubectl get pod -l ray.io/node-type=head 2>/dev/null | grep -q "ray-head"; do 
         echo -n "."
-        sleep 5
+        sleep 3
+    done
+    echo ""
+    
+    # 2. Wait for Running State
+    log "⏳ Phase 0.5: Waiting for Ray Head RUNNING state..."
+    until kubectl get pod -l ray.io/node-type=head -o jsonpath='{.items[0].status.phase}' 2>/dev/null | grep -q "Running"; do 
+        echo -n "."
+        # If pending for too long, print debug info
+        STATUS=$(kubectl get pod -l ray.io/node-type=head -o jsonpath='{.items[0].status.phase}' 2>/dev/null)
+        if [ "$STATUS" == "Pending" ]; then
+             echo -e "\n⚠️ Pod is Pending. Checking events..."
+             kubectl describe pod -l ray.io/node-type=head | grep -A 5 Events | tail -n 5
+             sleep 10
+        else
+             sleep 3
+        fi
     done
     echo ""
 
     log "🌐 Phase 1: Building Hardware NLB Bypass..."
     LB_NAME="hyp-lb-$RAND_ID"
+    
     # Create NLB
     LB_ARN=$(aws elbv2 create-load-balancer --name "$LB_NAME" --subnets $SUBNETS --type network --query "LoadBalancers[0].LoadBalancerArn" --output text)
+    
     # Create Target Group
     TG_ARN=$(aws elbv2 create-target-group --name "hyp-tg-$RAND_ID" --protocol TCP --port 30265 --vpc-id "$VPC_ID" --target-type instance --query "TargetGroups[0].TargetGroupArn" --output text)
     
     # Register Targets (Hardware Hack: All Nodes in Cluster)
+    # Filter for RUNNING instances only to avoid registering terminated ghosts
     INSTANCES=$(aws ec2 describe-instances --filters "Name=tag:kubernetes.io/cluster/$NAME,Values=owned" "Name=instance-state-name,Values=running" --query "Reservations[*].Instances[*].InstanceId" --output text)
+    
     if [ -z "$INSTANCES" ]; then
-        log "❌ No instances found. Check Karpenter."
+        log "❌ No instances found. Check Karpenter or EKS Node Group."
         exit 1
     fi
+    
     for ins in $INSTANCES; do 
         aws elbv2 register-targets --target-group-arn "$TG_ARN" --targets Id="$ins" || true
     done
