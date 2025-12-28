@@ -21,9 +21,9 @@ function bootstrap() {
 
 function ignite() {
     bootstrap
-    log "🚀 Ignite Sequence: V47.0.0"
+    log "🚀 Ignite Sequence: V50.0.0"
     
-    log "🧹 Cleaning IP Debris..."
+    # Quota Recovery
     for eip in $(aws ec2 describe-addresses --query "Addresses[?AssociationId==null].AllocationId" --output text); do
       aws ec2 release-address --allocation-id $eip || true
     done
@@ -37,35 +37,28 @@ function ignite() {
     ENDPOINT=$(terraform output -raw cluster_endpoint)
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
 
-    log "⏳ Waiting for Public API ($ENDPOINT)..."
-    until curl -k -s "$ENDPOINT/version" > /dev/null; do
-        log "API still warming up... (20s)"
-        sleep 20
-    done
-    log "✅ API Handshake Verified."
+    log "⏳ Waiting for API Readiness ($ENDPOINT)..."
+    until curl -k -s "$ENDPOINT/version" > /dev/null; do sleep 15; done
 
-    log "🛠️ Registering Repos..."
+    log "🛠️ Registering Stack Repos..."
     helm repo add cilium https://helm.cilium.io/
     helm repo add ray https://ray-project.github.io/kuberay-helm/
     helm repo update
 
     log "💉 Phase 1: Cilium eBPF..."
-    helm upgrade --install cilium cilium/cilium --version 1.16.5 -n kube-system \
-      --set kubeProxyReplacement=true --set-string debug.verbose="" --wait=false
+    helm upgrade --install cilium cilium/cilium --version 1.16.5 -n kube-system --set kubeProxyReplacement=true --set-string debug.verbose="" --wait=false
 
     log "💉 Phase 2: Karpenter..."
     CONTROLLER_ROLE=$(terraform output -raw karpenter_role)
-    QUEUE_NAME=$(terraform output -raw interruption_queue)
     helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter --version 1.1.1 -n karpenter --create-namespace \
       --set "serviceAccount.annotations.eks\.amazonaws\.com/role-arn=$CONTROLLER_ROLE" \
-      --set settings.clusterName="$NAME" \
-      --set settings.interruptionQueue="$QUEUE_NAME" --wait=false
+      --set settings.clusterName="$NAME" --wait=false
 
-    log "💉 Phase 3: KubeRay..."
+    log "💉 Phase 3: KubeRay Operator..."
     helm upgrade --install kuberay kuberay/kuberay-operator --version 1.2.2 --wait=false
 
-    log "🏗️ Finalizing AI Forge..."
-    # Standardize on Tag-based discovery for Karpenter NodePool stability
+    log "🏗️ Applying Forge Manifests..."
+    sleep 20
     kubectl apply -f "$K8S_DIR/core/karpenter-gpu-pool.yaml"
     kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"
     log "✅ SYSTEM ARMED."
@@ -73,7 +66,7 @@ function ignite() {
 
 function demo() {
     bootstrap
-    log "🎭 Launching Spectator Protocol..."
+    log "🎭 Launching Spectator Protocol (Hardware Bypass)..."
     cd "$TF_DIR"
     terraform init "${INIT_OPTS[@]}" -reconfigure > /dev/null
     NAME=$(terraform output -raw cluster_name)
@@ -95,12 +88,9 @@ spec:
 EOF
 
     log "⏳ Phase 0: Waiting for Ray Pod..."
-    until kubectl get pod -l ray.io/node-type: head | grep "1/1" > /dev/null 2>&1; do
-        log "Pod is warming up..."
-        sleep 15
-    done
+    until kubectl get pod -l ray.io/node-type: head | grep "1/1" > /dev/null 2>&1; do sleep 15; done
 
-    log "🌐 Phase 1: Building Hardware NLB..."
+    log "🌐 Step 2: Building Hardware NLB via CLI..."
     LB_NAME="hyp-lb-$RAND_ID"
     LB_ARN=$(aws elbv2 create-load-balancer --name "$LB_NAME" --subnets $SUBNETS --type network --query "LoadBalancers[0].LoadBalancerArn" --output text)
     TG_ARN=$(aws elbv2 create-target-group --name "hyp-tg-$RAND_ID" --protocol TCP --port 30265 --vpc-id "$VPC_ID" --target-type instance --query "TargetGroups[0].TargetGroupArn" --output text)
