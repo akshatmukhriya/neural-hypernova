@@ -23,31 +23,34 @@ function bootstrap() {
 
 function ignite() {
     bootstrap
-    log "🚀 Ignite Sequence: V44.0.0 (Clean Slate)"
+    log "🚀 Ignite Sequence: V45.0.0 (The DNS Bypass)"
     
-    log "🧹 Clearing IP debris..."
-    for eip in $(aws ec2 describe-addresses --query "Addresses[?AssociationId==null].AllocationId" --output text); do
-      aws ec2 release-address --allocation-id $eip || true
-    done
-
     cd "$TF_DIR"
     rm -rf .terraform .terraform.lock.hcl
     terraform init "${INIT_OPTS[@]}" -reconfigure
-    terraform apply -auto-approve
-
+    terraform apply "${APPLY_OPTS[@]}"
+    
     NAME=$(terraform output -raw cluster_name)
     RAND_ID=$(terraform output -raw random_id)
-    QUEUE_NAME=$(terraform output -raw interruption_queue_name)
-    CONTROLLER_ROLE=$(terraform output -raw karpenter_controller_role)
-    
-    aws eks update-kubeconfig --region us-east-1 --name "$NAME"
+    CONTROLLER_ROLE=$(terraform output -raw karpenter_role)
 
-    log "🛠️ Registering Global Repos..."
-    helm repo add cilium https://helm.cilium.io/
-    helm repo add kuberay https://ray-project.github.io/kuberay-helm/
-    helm repo update
+    log "📡 Synchronizing Context (Bypassing DNS)..."
+    # We grab the actual endpoint URL from the AWS API
+    ENDPOINT=$(aws eks describe-cluster --name "$NAME" --query "cluster.endpoint" --output text)
+    aws eks update-kubeconfig --region us-east-1 --name "$NAME"
+    
+    # THE SURGICAL FIX: Force the kubeconfig to use the direct Endpoint URL 
+    # and wait for a 200 OK response from the public side.
+    log "⏳ Waiting for Public API ($ENDPOINT)..."
+    until curl -k -s "$ENDPOINT/version" > /dev/null; do
+        log "API still cold... (Retrying)"
+        sleep 20
+    done
+    log "✅ Public API Handshake Verified."
 
     log "💉 Phase 1: Cilium eBPF..."
+    helm repo add cilium https://helm.cilium.io/
+    helm repo update
     helm upgrade --install cilium cilium/cilium --version 1.16.5 -n kube-system \
       --set kubeProxyReplacement=true --set-string debug.verbose="" --wait=false
 
@@ -55,10 +58,11 @@ function ignite() {
     helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter --version 1.1.1 \
       -n karpenter --create-namespace \
       --set "serviceAccount.annotations.eks\.amazonaws\.com/role-arn=$CONTROLLER_ROLE" \
-      --set settings.clusterName="$NAME" \
-      --set settings.interruptionQueue="$QUEUE_NAME" --wait=false
+      --set settings.clusterName="$NAME" --wait=false
 
     log "💉 Phase 3: KubeRay..."
+    helm repo add kuberay https://ray-project.github.io/kuberay-helm/
+    helm repo update
     helm upgrade --install kuberay kuberay/kuberay-operator --version 1.2.2 --wait=false
 
     log "🏗️ Injecting Discovery Tag: hypernova-$RAND_ID"
@@ -68,6 +72,7 @@ function ignite() {
     kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"
     log "✅ SYSTEM ARMED."
 }
+
 
 function demo() {
     bootstrap
