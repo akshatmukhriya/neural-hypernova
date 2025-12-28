@@ -90,6 +90,7 @@ module "eks" {
 
   eks_managed_node_groups = {
     brain = {
+      name           = "brain-pool-${random_string.id.result}"
       instance_types = ["t3.large"]
       ami_type       = "AL2023_x86_64_STANDARD"
       vpc_security_group_ids = [aws_security_group.forge_sg.id]

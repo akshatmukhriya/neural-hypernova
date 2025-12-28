@@ -9,7 +9,7 @@ K8S_DIR="$ROOT_DIR/k8s"
 function log() { echo -e "\033[0;36m[HYPERNOVA] $1\033[0m"; }
 
 function bootstrap() {
-    log "📡 Detecting Identity..."
+    log "📡 Detecting Cloud Identity..."
     RUNNER_ARN=$(aws sts get-caller-identity --query Arn --output text)
     ACCOUNT_ID=$(echo $RUNNER_ARN | cut -d: -f5)
     [[ $RUNNER_ARN == *"assumed-role"* ]] && CLEAN_ARN="arn:aws:iam::$ACCOUNT_ID:role/$(echo $RUNNER_ARN | cut -d/ -f2)" || CLEAN_ARN=$RUNNER_ARN
@@ -21,9 +21,9 @@ function bootstrap() {
 
 function ignite() {
     bootstrap
-    log "🚀 Ignite Sequence: V50.0.0 (The Final Verdict)"
+    log "🚀 Ignite Sequence: V51.0.0 (The Final Strike)"
     
-    log "🧹 Cleaning IP Quota..."
+    # Quota Sweep
     for eip in $(aws ec2 describe-addresses --query "Addresses[?AssociationId==null].AllocationId" --output text); do
       aws ec2 release-address --allocation-id $eip || true
     done
@@ -37,20 +37,26 @@ function ignite() {
     ENDPOINT=$(aws eks describe-cluster --name "$NAME" --query "cluster.endpoint" --output text)
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
 
-    log "⏳ Waiting for Public API ($ENDPOINT)..."
-    until curl -k -s "$ENDPOINT/version" > /dev/null; do
-        log "API still warming up... (20s)"
-        sleep 20
-    done
+    log "⏳ Verifying API connectivity ($ENDPOINT)..."
+    until curl -k -s "$ENDPOINT/version" > /dev/null; do sleep 15; done
     log "✅ API Handshake Verified."
 
-    log "🛠️ Injecting Layers..."
+    log "🛠️ Registering Repos..."
     helm repo add cilium https://helm.cilium.io/
     helm repo add kuberay https://ray-project.github.io/kuberay-helm/
     helm repo update
 
-    log "💉 Phase 1: Cilium eBPF..."
-    helm upgrade --install cilium cilium/cilium --version 1.16.5 -n kube-system --set kubeProxyReplacement=true --wait=false
+    log "💉 Phase 1: Cilium eBPF (Manifest Mode)..."
+    # THE UNICORN FIX: Generate values file to ensure strict YAML types
+    cat <<EOF > cilium-values.yaml
+kubeProxyReplacement: true
+operator:
+  replicas: 1
+debug:
+  enabled: false
+  verbose: ""
+EOF
+    helm upgrade --install cilium cilium/cilium --version 1.16.5 -n kube-system -f cilium-values.yaml --wait=false
 
     log "💉 Phase 2: Karpenter..."
     CONTROLLER_ROLE=$(terraform output -raw karpenter_role)
@@ -72,7 +78,7 @@ function ignite() {
 
 function demo() {
     bootstrap
-    log "🎭 Launching Spectator Protocol (Hardware Bypass)..."
+    log "🎭 Launching Spectator Protocol..."
     cd "$TF_DIR"
     terraform init "${INIT_OPTS[@]}" -reconfigure > /dev/null
     NAME=$(terraform output -raw cluster_name)
@@ -81,7 +87,7 @@ function demo() {
     SUBNETS=$(terraform output -json public_subnets | jq -r '.[]' | paste -sd " " -)
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
 
-    log "🌐 Step 1: Deploying Dashboard NodePort..."
+    log "🌐 Exposing Dashboard..."
     cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: Service
@@ -94,12 +100,9 @@ spec:
 EOF
 
     log "⏳ Phase 0: Waiting for Ray Pod..."
-    until kubectl get pod -l ray.io/node-type=head | grep "1/1" > /dev/null 2>&1; do
-        log "Pod is warming up..."
-        sleep 15
-    done
+    until kubectl get pod -l ray.io/node-type=head | grep "1/1" > /dev/null 2>&1; do sleep 15; done
 
-    log "🌐 Step 2: Building Hardware NLB via CLI (Webhook Bypass)..."
+    log "🌐 Phase 1: Building Hardware NLB..."
     LB_NAME="hyp-lb-$RAND_ID"
     LB_ARN=$(aws elbv2 create-load-balancer --name "$LB_NAME" --subnets $SUBNETS --type network --query "LoadBalancers[0].LoadBalancerArn" --output text)
     TG_ARN=$(aws elbv2 create-target-group --name "hyp-tg-$RAND_ID" --protocol TCP --port 30265 --vpc-id "$VPC_ID" --target-type instance --query "TargetGroups[0].TargetGroupArn" --output text)
@@ -108,7 +111,7 @@ EOF
     aws elbv2 create-listener --load-balancer-arn "$LB_ARN" --protocol TCP --port 8265 --default-actions Type=forward,TargetGroupArn="$TG_ARN" > /dev/null
 
     URL=$(aws elbv2 describe-load-balancers --load-balancer-arns "$LB_ARN" --query "LoadBalancers[0].DNSName" --output text)
-    echo -e "\033[0;32m🚀 DASHBOARD: http://$URL:8265 (Wait 60s for NLB Active)\033[0m"
+    echo -e "\033[0;32m🚀 DASHBOARD: http://$URL:8265 (Wait 60s for Active)\033[0m"
 }
 
 function nuke() {
