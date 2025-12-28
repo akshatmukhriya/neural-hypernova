@@ -19,8 +19,7 @@ spec:
               - containerPort: 6379
               - containerPort: 10001
             resources:
-              # SURGICAL COMPRESSION:
-              # Requests 0.2 CPU, allows burst to 1 CPU.
+              # Optimized for t3.large Head Node
               requests:
                 cpu: "200m"
                 memory: "512Mi"
@@ -28,7 +27,7 @@ spec:
                 cpu: "1"
                 memory: "2Gi"
   workerGroupSpecs:
-    - replicas: 0 # Keep at 0 to prove JIT scaling works
+    - replicas: 0 # JIT Mode: 0 replicas start, scales on job demand
       minReplicas: 0
       maxReplicas: 10
       groupName: gpu-group

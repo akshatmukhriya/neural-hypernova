@@ -12,60 +12,70 @@ function bootstrap() {
     log "📡 Detecting Cloud Identity..."
     RUNNER_ARN=$(aws sts get-caller-identity --query Arn --output text)
     ACCOUNT_ID=$(echo $RUNNER_ARN | cut -d: -f5)
+    # Handle assumed roles for clean S3 naming
     [[ $RUNNER_ARN == *"assumed-role"* ]] && CLEAN_ARN="arn:aws:iam::$ACCOUNT_ID:role/$(echo $RUNNER_ARN | cut -d/ -f2)" || CLEAN_ARN=$RUNNER_ARN
+    
     BUCKET="hypernova-state-$ACCOUNT_ID"
+    log "📦 State Sovereign: s3://$BUCKET"
     aws s3 mb "s3://$BUCKET" --region us-east-1 2>/dev/null || true
+    
     INIT_OPTS=(-backend-config="bucket=$BUCKET")
     APPLY_OPTS=(-var="runner_arn=$CLEAN_ARN" -auto-approve)
 }
 
 function ignite() {
     bootstrap
-    log "🚀 Ignite Sequence: V52.0.0"
+    log "🚀 Ignite Sequence: V54.0.0"
     
-    # Quota Sweep
+    # Pre-flight Clean: Remove ghost EIPs to prevent Quota limits
     for eip in $(aws ec2 describe-addresses --query "Addresses[?AssociationId==null].AllocationId" --output text); do
       aws ec2 release-address --allocation-id $eip || true
     done
 
     cd "$TF_DIR"
+    # Hard Reset Terraform Local State
     rm -rf .terraform .terraform.lock.hcl
     terraform init "${INIT_OPTS[@]}" -reconfigure
     terraform apply "${APPLY_OPTS[@]}"
     
     NAME=$(terraform output -raw cluster_name)
     ENDPOINT=$(terraform output -raw cluster_endpoint)
+    RAND_ID=$(terraform output -raw random_id)
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
 
     log "⏳ Verifying API connectivity ($ENDPOINT)..."
-    until curl -k -s "$ENDPOINT/version" > /dev/null; do sleep 15; done
+    until curl -k -s "$ENDPOINT/version" > /dev/null; do sleep 5; done
 
     log "🛠️ Registering Global Repos..."
     helm repo add cilium https://helm.cilium.io/
-    # THE REPO FIX: Explicit alias 'kuberay' for the chart reference
     helm repo add kuberay https://ray-project.github.io/kuberay-helm/
     helm repo update
 
-    log "💉 Phase 1: Cilium eBPF..."
+    log "💉 Phase 1: Cilium eBPF (Direct Routing)..."
+    # Skipping kube-proxy replacement strict checks for speed, using standard install
     helm upgrade --install cilium cilium/cilium --version 1.16.5 -n kube-system \
       --set kubeProxyReplacement=true --set-string debug.verbose="" --wait=false
 
-    log "💉 Phase 2: Karpenter..."
+    log "💉 Phase 2: Karpenter (JIT Scaler)..."
     CONTROLLER_ROLE=$(terraform output -raw karpenter_role)
     helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter --version 1.1.1 -n karpenter --create-namespace \
       --set "serviceAccount.annotations.eks\.amazonaws\.com/role-arn=$CONTROLLER_ROLE" \
       --set settings.clusterName="$NAME" --wait=false
 
-    log "💉 Phase 3: KubeRay (Fixed Alias)..."
+    log "💉 Phase 3: KubeRay Operator..."
     helm upgrade --install kuberay kuberay/kuberay-operator --version 1.2.2 --wait=false
 
     log "🏗️ Finalizing AI Forge..."
-    RAND_ID=$(terraform output -raw random_id)
-    sed "s/DISCOVERY_TAG_PLACEHOLDER/neural-hypernova/g" "$K8S_DIR/core/karpenter-gpu-pool.yaml" > "$K8S_DIR/core/active-pool.yaml"
-    sleep 20
+    # Ensure the Pool has the correct Discovery Tag for this specific cluster ID
+    # Note: We are injecting the cluster name into the discovery tag to avoid cross-cluster node theft
+    sed "s/neural-hypernova/hypernova-$RAND_ID/g" "$K8S_DIR/core/karpenter-gpu-pool.yaml" > "$K8S_DIR/core/active-pool.yaml"
+    
+    # Wait for CRDs
+    sleep 15
     kubectl apply -f "$K8S_DIR/core/active-pool.yaml"
     kubectl apply -f "$K8S_DIR/ai-forge/ray-cluster.yaml"
-    log "✅ SYSTEM ARMED."
+    
+    log "✅ SYSTEM ARMED. Cluster: $NAME"
 }
 
 function demo() {
@@ -79,7 +89,7 @@ function demo() {
     SUBNETS=$(terraform output -json public_subnets | jq -r '.[]' | paste -sd " " -)
     aws eks update-kubeconfig --region us-east-1 --name "$NAME"
 
-    log "🌐 Exposing Dashboard..."
+    log "🌐 Exposing Dashboard via NodePort..."
     cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: Service
@@ -91,44 +101,75 @@ spec:
   ports: [{ nodePort: 30265, port: 8265, targetPort: 8265 }]
 EOF
 
-    log "⏳ Phase 0: Waiting for Ray Pod..."
-    until kubectl get pod -l ray.io/node-type: head | grep "1/1" > /dev/null 2>&1; do sleep 15; done
+    log "⏳ Phase 0: Waiting for Ray Head..."
+    # Wait for Head status Running
+    until kubectl get pod -l ray.io/node-type:head -o jsonpath='{.items[0].status.phase}' 2>/dev/null | grep -q "Running"; do 
+        echo -n "."
+        sleep 5
+    done
+    echo ""
 
-    log "🌐 Phase 1: Building Hardware NLB..."
+    log "🌐 Phase 1: Building Hardware NLB Bypass..."
     LB_NAME="hyp-lb-$RAND_ID"
+    # Create NLB
     LB_ARN=$(aws elbv2 create-load-balancer --name "$LB_NAME" --subnets $SUBNETS --type network --query "LoadBalancers[0].LoadBalancerArn" --output text)
+    # Create Target Group
     TG_ARN=$(aws elbv2 create-target-group --name "hyp-tg-$RAND_ID" --protocol TCP --port 30265 --vpc-id "$VPC_ID" --target-type instance --query "TargetGroups[0].TargetGroupArn" --output text)
+    
+    # Register Targets (Hardware Hack: All Nodes in Cluster)
     INSTANCES=$(aws ec2 describe-instances --filters "Name=tag:kubernetes.io/cluster/$NAME,Values=owned" "Name=instance-state-name,Values=running" --query "Reservations[*].Instances[*].InstanceId" --output text)
-    for ins in $INSTANCES; do aws elbv2 register-targets --target-group-arn "$TG_ARN" --targets Id="$ins" || true; done
+    if [ -z "$INSTANCES" ]; then
+        log "❌ No instances found. Check Karpenter."
+        exit 1
+    fi
+    for ins in $INSTANCES; do 
+        aws elbv2 register-targets --target-group-arn "$TG_ARN" --targets Id="$ins" || true
+    done
+    
+    # Create Listener
     aws elbv2 create-listener --load-balancer-arn "$LB_ARN" --protocol TCP --port 8265 --default-actions Type=forward,TargetGroupArn="$TG_ARN" > /dev/null
 
     URL=$(aws elbv2 describe-load-balancers --load-balancer-arns "$LB_ARN" --query "LoadBalancers[0].DNSName" --output text)
-    echo -e "\033[0;32m🚀 DASHBOARD: http://$URL:8265 (Wait 60s for Active)\033[0m"
+    echo -e "\033[0;32m🚀 DASHBOARD LIVE: http://$URL:8265\033[0m"
 }
 
 function nuke() {
     bootstrap
     log "☢️ NUCLEAR RESET..."
     cd "$TF_DIR"
-    rm -rf .terraform .terraform.lock.hcl
-    terraform init "${INIT_OPTS[@]}" -reconfigure || true
+    
+    # Attempt to fetch state variables before destroying
     VPC_ID=$(terraform output -raw vpc_id 2>/dev/null || echo "")
-    RAND_ID=$(terraform output -raw random_id 2>/dev/null || echo "final")
-    NAME=$(terraform output -raw cluster_name 2>/dev/null || echo "hypernova")
+    NAME=$(terraform output -raw cluster_name 2>/dev/null || echo "")
 
+    # 1. Kill LBs first to free ENIs
+    log "🧹 Sweeping Load Balancers..."
     LB_ARNS=$(aws elbv2 describe-load-balancers --query "LoadBalancers[?contains(LoadBalancerName, 'hyp-lb')].LoadBalancerArn" --output text)
     for lb in $LB_ARNS; do aws elbv2 delete-load-balancer --load-balancer-arn "$lb" || true; done
+    sleep 5 # AWS API cool-off
 
-    aws eks delete-cluster --name "$NAME" --region us-east-1 2>/dev/null || true
-    for eip in $(aws ec2 describe-addresses --region us-east-1 --query "Addresses[?VpcId=='$VPC_ID'].AllocationId" --output text); do
-      aws ec2 release-address --allocation-id "$eip" --region us-east-1 || true
-    done
+    # 2. Kill Target Groups
+    TG_ARNS=$(aws elbv2 describe-target-groups --query "TargetGroups[?contains(TargetGroupName, 'hyp-tg')].TargetGroupArn" --output text)
+    for tg in $TG_ARNS; do aws elbv2 delete-target-group --target-group-arn "$tg" || true; done
+
+    # 3. Destroy Terraform
+    rm -rf .terraform .terraform.lock.hcl
+    terraform init "${INIT_OPTS[@]}" -reconfigure || true
     terraform destroy -auto-approve || true
-    log "🌑 CLEAN."
+    
+    # 4. Final Cleanup (Ghost EIPs)
+    if [ -n "$VPC_ID" ]; then
+        for eip in $(aws ec2 describe-addresses --region us-east-1 --query "Addresses[?VpcId=='$VPC_ID'].AllocationId" --output text); do
+          aws ec2 release-address --allocation-id "$eip" --region us-east-1 || true
+        done
+    fi
+    
+    log "🌑 HYPERNOVA ERASED."
 }
 
 case "$1" in
     ignite) ignite ;;
     nuke) nuke ;;
     demo) demo ;;
+    *) echo "Usage: $0 {ignite|demo|nuke}" ;;
 esac

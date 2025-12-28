@@ -1,4 +1,4 @@
-# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V52.0.0 ---
+# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V54.0.0 ---
 
 terraform {
   required_version = ">= 1.5.0"
@@ -81,11 +81,19 @@ module "eks" {
   vpc_id          = module.vpc.vpc_id
   subnet_ids      = module.vpc.private_subnets
 
-  # Bypassing module internal encryption bugs by using defaults
+  # --- V54.0.0 FIX: THE LOG GROUP BYPASS ---
+  # Disables Terraform management of the log group to prevent "ResourceAlreadyExists"
+  create_cloudwatch_log_group = false
+  cluster_enabled_log_types   = [] 
+
+  # Identity & Access
   authentication_mode                      = "API_AND_CONFIG_MAP"
   enable_cluster_creator_admin_permissions = true
   cluster_endpoint_public_access           = true
   cluster_endpoint_public_access_cidrs     = ["0.0.0.0/0"]
+
+  # Encryption Bug Bypass (Disable custom config, use AWS default)
+  cluster_encryption_config = {}
 
   eks_managed_node_groups = {
     brain = {
@@ -94,8 +102,12 @@ module "eks" {
       ami_type       = "AL2023_x86_64_STANDARD"
       vpc_security_group_ids = [aws_security_group.forge_sg.id]
       
+      # Permissions for Karpenter
       iam_role_name            = "KarpenterNodeRole-hypernova-${random_string.id.result}"
       iam_role_use_name_prefix = false
+      iam_role_additional_policies = {
+        AmazonSSMManagedInstanceCore = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+      }
     }
   }
 }

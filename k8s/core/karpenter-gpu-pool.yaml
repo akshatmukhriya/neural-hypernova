@@ -31,12 +31,12 @@ metadata:
   name: default
 spec:
   amiFamily: AL2023
-  role: "KarpenterNodeRole-neural-hypernova"
+  role: "KarpenterNodeRole-neural-hypernova" # This name must match strict string in main.tf or be dynamic
   subnetSelectorTerms:
     - tags:
-        karpenter.sh/discovery: "neural-hypernova"
+        karpenter.sh/discovery: "neural-hypernova" # Script replaces this with actual ID
   securityGroupSelectorTerms:
     - tags:
-        karpenter.sh/discovery: "neural-hypernova"
+        karpenter.sh/discovery: "neural-hypernova" # Script replaces this with actual ID
   amiSelectorTerms:
     - alias: al2023@latest
