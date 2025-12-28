@@ -1,4 +1,4 @@
-# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V43.0.0 ---
+# --- NEURAL HYPERNOVA: INDUSTRIAL INFRASTRUCTURE V47.0.0 ---
 
 terraform {
   required_version = ">= 1.5.0"
@@ -15,20 +15,21 @@ terraform {
 
 provider "aws" { region = "us-east-1" }
 
-variable "runner_arn" {
-  type    = string
-  default = ""
-}
-
+# --- 1. GLOBAL IDENTITY ---
 resource "random_string" "id" {
   length  = 6
   special = false
   upper   = false
 }
 
+variable "runner_arn" {
+  type    = string
+  default = ""
+}
+
 data "aws_caller_identity" "current" {}
 
-# --- 1. NETWORK ---
+# --- 2. NETWORK ---
 module "vpc" {
   source  = "terraform-aws-modules/vpc/aws"
   version = "5.2.0"
@@ -45,12 +46,13 @@ module "vpc" {
   private_subnet_tags = { "karpenter.sh/discovery" = "neural-hypernova" }
 }
 
-# --- 2. SECURITY GROUP ---
+# --- 3. DEDICATED SECURITY ---
 resource "aws_security_group" "forge_sg" {
-  name_prefix = "hypernova-forge-sg-"
+  name_prefix = "hypernova-sg-"
   vpc_id      = module.vpc.vpc_id
 
   ingress {
+    description = "VPC Internal"
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
@@ -58,7 +60,8 @@ resource "aws_security_group" "forge_sg" {
   }
 
   ingress {
-    from_port   = 30265 # NodePort
+    description = "Ray Dashboard NodePort"
+    from_port   = 30265
     to_port     = 30265
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
@@ -70,9 +73,11 @@ resource "aws_security_group" "forge_sg" {
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
+
+  tags = { "karpenter.sh/discovery" = "neural-hypernova" }
 }
 
-# --- 3. EKS 1.31 ---
+# --- 4. THE BRAIN (EKS 1.31) ---
 module "eks" {
   source  = "terraform-aws-modules/eks/aws"
   version = "20.24.0"
@@ -82,15 +87,22 @@ module "eks" {
   vpc_id          = module.vpc.vpc_id
   subnet_ids      = module.vpc.private_subnets
 
+  # Bypassing module bugs
   create_kms_key              = false
   create_cloudwatch_log_group = false
-  cluster_encryption_config   = {} 
-
+  
   authentication_mode                      = "API_AND_CONFIG_MAP"
   enable_cluster_creator_admin_permissions = true
   cluster_endpoint_public_access           = true
+  cluster_endpoint_public_access_cidrs     = ["0.0.0.0/0"]
 
-  node_security_group_tags = { "karpenter.sh/discovery" = "neural-hypernova" }
+  # Identity Handshake for 1.31 Joining
+  access_entries = {
+    nodes = {
+      principal_arn = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/KarpenterNodeRole-hypernova"
+      type          = "EC2_LINUX"
+    }
+  }
 
   eks_managed_node_groups = {
     brain = {
@@ -103,25 +115,14 @@ module "eks" {
       vpc_security_group_ids   = [aws_security_group.forge_sg.id]
     }
   }
-
-  access_entries = {
-    nodes = {
-      principal_arn = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/KarpenterNodeRole-hypernova"
-      type          = "EC2_LINUX"
-    }
-    karpenter = {
-      principal_arn = module.karpenter_role.iam_role_arn
-      policy_associations = {
-        admin = {
-          policy_arn = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
-          access_scope = { type = "cluster" }
-        }
-      }
-    }
-  }
 }
 
-# --- 4. KARPENTER IAM ---
+# --- 5. KARPENTER INFRASTRUCTURE (The Interruption Handler) ---
+resource "aws_sqs_queue" "karpenter_interruption" {
+  name                      = "hypernova-q-${random_string.id.result}"
+  message_retention_seconds = 300
+}
+
 module "karpenter_role" {
   source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
   version = "5.33.0"
@@ -137,11 +138,33 @@ module "karpenter_role" {
   }
 }
 
-# --- 5. OUTPUTS (COMPLETE TELEMETRY) ---
-output "cluster_name"      { value = module.eks.cluster_name }
-output "vpc_id"            { value = module.vpc.vpc_id }
-output "public_subnets"    { value = module.vpc.public_subnets }
-output "random_id"         { value = random_string.id.result }
-output "karpenter_role"    { value = module.karpenter_role.iam_role_arn }
-output "node_sg_id"        { value = aws_security_group.forge_sg.id }
-output "private_subnets"   { value = module.vpc.private_subnets }
+resource "aws_iam_role_policy" "karpenter_extra" {
+  name = "karpenter-extra-perms"
+  role = module.karpenter_role.iam_role_name
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = ["eks:DescribeCluster", "ec2:DescribeSubnets", "ec2:DescribeSecurityGroups", "ec2:DescribeInstances", "ec2:DescribeInstanceTypes", "ec2:DescribeInstanceTypeOfferings", "ec2:DescribeAvailabilityZones", "ssm:GetParameter"]
+        Effect = "Allow"
+        Resource = "*"
+      },
+      {
+        Action = ["sqs:DeleteMessage", "sqs:GetQueueAttributes", "sqs:ReceiveMessage"]
+        Effect = "Allow"
+        Resource = aws_sqs_queue.karpenter_interruption.arn
+      }
+    ]
+  })
+}
+
+# --- 6. COMPLETE TELEMETRY OUTPUTS ---
+output "cluster_name"       { value = module.eks.cluster_name }
+output "cluster_endpoint"   { value = module.eks.cluster_endpoint }
+output "vpc_id"             { value = module.vpc.vpc_id }
+output "public_subnets"     { value = module.vpc.public_subnets }
+output "random_id"          { value = random_string.id.result }
+output "karpenter_role"     { value = module.karpenter_role.iam_role_arn }
+output "interruption_queue" { value = aws_sqs_queue.karpenter_interruption.name }
+output "node_sg_id"         { value = aws_security_group.forge_sg.id }
+output "private_subnets"    { value = module.vpc.private_subnets }
